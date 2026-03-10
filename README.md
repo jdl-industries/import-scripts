@@ -1,13 +1,20 @@
-# JDL Import Tool
+# JDL Shopify Import Tool
 
-WooCommerce to Shopify product catalog import tool for aerospace and industrial coatings. Transforms product data using Claude AI to generate SEO-optimized titles, descriptions, and metadata.
+Import transformed product data into Shopify for JDL Industries aerospace/industrial coatings catalog.
+
+## Overview
+
+This tool is part of a two-step workflow for migrating products from WooCommerce to Shopify:
+
+1. **Transform** (Manual with LLM): Use the prompt in `catalog creation prompt.md` with any LLM (ChatGPT, Claude, etc.) to transform WooCommerce export data into a Shopify-compatible CSV.
+
+2. **Import** (This Tool): Use this CLI tool to import the transformed CSV into Shopify via the Admin API.
 
 ## Prerequisites
 
 - Node.js 18+
 - npm
-- Anthropic API key (for Claude)
-- Shopify Admin API credentials (optional, for direct import)
+- Shopify store with Admin API access
 
 ## Installation
 
@@ -17,7 +24,7 @@ npm install
 
 ## Configuration
 
-Copy the example environment file and fill in your credentials:
+Copy the example environment file and add your Shopify credentials:
 
 ```bash
 cp .env.example .env
@@ -25,114 +32,92 @@ cp .env.example .env
 
 Required environment variables:
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `ANTHROPIC_API_KEY` | Anthropic API key for Claude | Yes |
-| `SHOPIFY_STORE_DOMAIN` | Your Shopify store domain (e.g., `store.myshopify.com`) | Only for `--import` |
-| `SHOPIFY_ACCESS_TOKEN` | Shopify Admin API access token | Only for `--import` |
+| Variable | Description |
+|----------|-------------|
+| `SHOPIFY_STORE_DOMAIN` | Your Shopify store domain (e.g., `store.myshopify.com`) |
+| `SHOPIFY_ACCESS_TOKEN` | Admin API access token |
 
 ### Getting a Shopify Access Token
 
-1. Go to your Shopify Admin → Settings → Apps and sales channels
+1. Go to Shopify Admin → Settings → Apps and sales channels
 2. Click "Develop apps" → "Create an app"
-3. Configure Admin API scopes: `write_products`, `read_products`
+3. Configure Admin API scopes:
+   - `read_products`
+   - `write_products`
 4. Install the app and copy the Admin API access token
 
 ## Usage
 
-### Generate CSV Only
+### Step 1: Transform Products with LLM
 
-Transform WooCommerce export to Shopify-compatible CSV:
+1. Export products from WooCommerce as CSV
+2. Open your preferred LLM (ChatGPT, Claude, etc.)
+3. Paste the contents of `catalog creation prompt.md`
+4. Attach or paste the WooCommerce CSV data
+5. Ask the LLM to transform the products
+6. Save the output as `products.csv`
+
+**Tips for large catalogs:**
+- Process in batches of 10-20 products at a time
+- Use a model with large context window (Claude, GPT-4)
+- Verify the first batch output before continuing
+
+### Step 2: Import to Shopify
 
 ```bash
-# Using ts-node for development
-npm run dev -- input.csv output.csv
+# Validate CSV format (no import)
+npm run dev -- --validate products.csv
 
-# Using compiled JavaScript
-npm run build
-npm start -- input.csv output.csv
-```
+# Preview products without importing
+npm run dev -- --dry-run products.csv
 
-### Generate CSV and Import to Shopify
-
-```bash
-npm run dev -- --import input.csv output.csv
+# Import products to Shopify
+npm run dev -- products.csv
 ```
 
 ### Command Line Options
 
 ```
 Usage:
-  npm run dev -- [options] <input.csv> [output.csv]
+  npm run dev -- <products.csv>
+  npm run dev -- --validate <products.csv>
+  npm run dev -- --dry-run <products.csv>
 
 Options:
-  --import    After generating CSV, also import products to Shopify via Admin API
-  --help      Show help message
-
-Arguments:
-  input.csv   Path to WooCommerce product export CSV (default: input.csv)
-  output.csv  Path for generated Shopify CSV (default: output.csv)
+  --validate   Only validate CSV format, don't import
+  --dry-run    Parse and display products without importing
+  --help       Show help message
 ```
 
-## Input Format
+## CSV Format
 
-The tool expects a WooCommerce product export CSV with the following structure:
+The input CSV must have exactly these 23 columns (see `catalog creation prompt.md` for details):
 
 | Column | Description |
 |--------|-------------|
 | SKU | Product SKU |
-| Name | Product name |
-| Short description | Contains mil spec, QPL info (HTML) |
-| Description | Full product description (HTML) |
-| Regular price | Product price |
-| Weight (lbs) | Product weight |
-| Length/Width/Height (in) | Product dimensions |
-
-Product attributes are expected in WooCommerce's attribute column format:
-- `Attribute 1 name`, `Attribute 1 value(s)`
-- `Attribute 2 name`, `Attribute 2 value(s)`
-- etc.
-
-Expected attributes:
-- Manufacturer
-- Vendor SKU
-- Barcode1 (often contains NSN)
-- Hazardous (Yes/No)
-- Aviation (Yes/No)
-- Marine (Yes/No)
-- Industrial (Yes/No)
-- Special packaging (Yes/No)
-- Lead time
-
-## Output Format
-
-The tool generates a CSV with 23 columns:
-
-1. SKU
-2. Title
-3. Description
-4. Regular Price
-5. Weight
-6. Length
-7. Width
-8. Height
-9. Aviation
-10. Marine
-11. Industrial
-12. Special Packaging
-13. Category
-14. Is Hazmat
-15. Manufacturer Part Number
-16. QPL
-17. NSN
-18. Military Specification
-19. Compliance and Certifications
-20. Lead Time
-21. Page Title
-22. Meta Description
-23. URL Handle
-
-See `catalog creation prompt.md` for detailed field specifications.
+| Title | Product title |
+| Description | Product description (HTML allowed) |
+| Regular Price | Price as number |
+| Weight | Weight in lbs |
+| Length | Length in inches |
+| Width | Width in inches |
+| Height | Height in inches |
+| Aviation | "Yes" or "No" |
+| Marine | "Yes" or "No" |
+| Industrial | "Yes" or "No" |
+| Special Packaging | "Yes" or "No" |
+| Category | Product category |
+| Is Hazmat | "true" or "false" |
+| Manufacturer Part Number | Vendor part number |
+| QPL | QPL specification |
+| NSN | National Stock Number |
+| Military Specification | MIL spec |
+| Compliance and Certifications | Other certifications |
+| Lead Time | Days as integer |
+| Page Title | SEO title (max 70 chars) |
+| Meta Description | SEO description (max 160 chars) |
+| URL Handle | URL slug |
 
 ## Development
 
@@ -140,81 +125,71 @@ See `catalog creation prompt.md` for detailed field specifications.
 
 ```
 src/
-├── index.ts        # CLI entry point
-├── parser.ts       # WooCommerce CSV parsing
-├── transformer.ts  # LLM-based content transformation
-├── output.ts       # Shopify CSV generation
-├── shopify.ts      # Shopify Admin API client
-└── types.ts        # TypeScript type definitions
+├── index.ts    # CLI entry point
+├── parser.ts   # CSV parsing and validation
+├── shopify.ts  # Shopify Admin API client
+└── types.ts    # TypeScript type definitions
 ```
 
 ### Scripts
 
 ```bash
-npm run dev      # Run with ts-node (development)
-npm run build    # Compile TypeScript to JavaScript
+npm run dev      # Run with tsx (development)
+npm run build    # Compile TypeScript
 npm start        # Run compiled JavaScript
 ```
 
-### How Transformation Works
+### How Import Works
 
-1. **Parsing**: The WooCommerce CSV is parsed, extracting standard columns and attribute pairs into structured product objects.
+1. **Validation**: CSV is checked for required columns
+2. **Parsing**: Products are extracted from CSV rows
+3. **Upsert**: For each product:
+   - Search Shopify for existing product by SKU
+   - If found, update the product
+   - If not found, create new product
+4. **Rate Limiting**: 250ms delay between API calls
 
-2. **Specification Extraction**: Regular expressions extract:
-   - Military specifications (MIL-PRF-XXXXX, MIL-DTL-XXXXX, etc.)
-   - QPL qualifications
-   - NSN (National Stock Numbers)
-   - Other certifications (BMS, MEP, FMS, LMCO specs)
+### Shopify Product Mapping
 
-3. **LLM Generation**: Each product is sent to Claude to generate:
-   - SEO-optimized title following the format: `{Manufacturer} {Part Numbers}, {Description}, {MIL-SPEC} {Type} {Class} {(QPL)}`
-   - Human-readable product description
-   - Page title (max 70 chars)
-   - Meta description (max 160 chars)
-   - URL handle
-
-4. **Output**: Transformed products are written to CSV and optionally imported to Shopify.
-
-### Adding New Fields
-
-1. Add the field to `ShopifyProduct` interface in `src/types.ts`
-2. Add the column name to `OUTPUT_COLUMNS` array in `src/types.ts`
-3. Update `transformProduct()` in `src/transformer.ts` to populate the field
-4. Update `productToRow()` in `src/output.ts` to include the field in the correct position
-5. If importing to Shopify, update `buildProductInput()` in `src/shopify.ts`
-6. Document the field in `catalog creation prompt.md`
-
-### Modifying the LLM Prompt
-
-The prompt sent to Claude is in `src/transformer.ts` in the `buildPrompt()` function. Modify this to change how titles, descriptions, or other generated content is formatted.
-
-### Rate Limiting
-
-- The Shopify import includes a 250ms delay between API calls to avoid rate limits.
-- Claude API calls are made sequentially (one product at a time) to manage costs and avoid rate limits.
+Products are created with:
+- **Title, Description, Handle**: From CSV
+- **Vendor**: Extracted from title (first word)
+- **Product Type**: From Category column
+- **Tags**: Aviation, Marine, Industrial, Hazmat flags
+- **SEO**: Page title and meta description
+- **Variant**: SKU, price, weight
+- **Metafields**:
+  - `custom.manufacturer_part_number`
+  - `custom.qpl`
+  - `custom.nsn`
+  - `custom.military_specification`
+  - `custom.compliance_certifications`
+  - `custom.lead_time_days`
+  - `custom.is_hazmat`
 
 ## Troubleshooting
 
-### "ANTHROPIC_API_KEY environment variable is required"
+### "Missing required columns"
 
-Ensure your `.env` file exists and contains a valid API key:
+Your CSV is missing expected columns. Check the column headers match exactly (case-sensitive). See the CSV Format section above.
 
-```bash
-ANTHROPIC_API_KEY=sk-ant-api03-...
-```
+### "SHOPIFY_STORE_DOMAIN and SHOPIFY_ACCESS_TOKEN are required"
 
-### CSV parsing errors
+Create a `.env` file with your Shopify credentials. See Configuration section.
 
-The parser uses relaxed options for quotes and column counts. If you still see parsing errors, check for:
-- Unescaped quotes in product descriptions
-- Inconsistent column counts between rows
-
-### Shopify import errors
+### Shopify API errors
 
 Common issues:
-- **Invalid handle**: URL handles must be unique and contain only lowercase letters, numbers, and dashes
-- **Missing required fields**: Ensure products have SKU and title
+- **Invalid handle**: URL handles must be unique, lowercase, with only letters, numbers, and dashes
 - **Rate limiting**: The tool includes delays, but if you hit limits, wait and retry
+- **Missing scopes**: Ensure your app has `read_products` and `write_products` scopes
+
+### Large imports
+
+For catalogs with many products:
+1. Transform in batches with the LLM
+2. Combine batches into one CSV (keep only one header row)
+3. Run the import tool
 
 ## License
 

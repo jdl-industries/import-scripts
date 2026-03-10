@@ -1,15 +1,15 @@
 import { createReadStream } from 'fs';
 import { parse } from 'csv-parse';
-import type { WooCommerceProduct } from './types.js';
+import type { ShopifyProduct } from './types.js';
+import { COLUMN_TO_PROPERTY } from './types.js';
 
 /**
- * Parse a WooCommerce product export CSV file
+ * Parse the LLM-generated product CSV file
  */
-export async function parseWooCommerceCSV(
+export async function parseProductCSV(
   filePath: string
-): Promise<WooCommerceProduct[]> {
-  const products: WooCommerceProduct[] = [];
-  const records: Record<string, string>[] = [];
+): Promise<ShopifyProduct[]> {
+  const products: ShopifyProduct[] = [];
 
   const parser = createReadStream(filePath).pipe(
     parse({
@@ -17,15 +17,12 @@ export async function parseWooCommerceCSV(
       skip_empty_lines: true,
       relax_quotes: true,
       relax_column_count: true,
+      trim: true,
     })
   );
 
   for await (const record of parser) {
-    records.push(record);
-  }
-
-  for (const record of records) {
-    const product = extractProduct(record);
+    const product = recordToProduct(record);
     if (product) {
       products.push(product);
     }
@@ -35,65 +32,57 @@ export async function parseWooCommerceCSV(
 }
 
 /**
- * Extract product data from a raw CSV record
+ * Convert a CSV record to a ShopifyProduct
  */
-function extractProduct(
+function recordToProduct(
   record: Record<string, string>
-): WooCommerceProduct | null {
+): ShopifyProduct | null {
+  // Check for SKU - required field
   const sku = record['SKU']?.trim();
-
-  // Skip records without SKU
   if (!sku) {
     return null;
   }
 
-  // Extract attributes from the WooCommerce attribute columns
-  const attributes = extractAttributes(record);
+  // Build product object from CSV columns
+  const product: Partial<ShopifyProduct> = {};
 
-  return {
-    sku,
-    name: record['Name']?.trim() || '',
-    shortDescription: record['Short description']?.trim() || '',
-    description: record['Description']?.trim() || '',
-    regularPrice: record['Regular price']?.trim() || '',
-    weight: record['Weight (lbs)']?.trim() || '',
-    length: record['Length (in)']?.trim() || '',
-    width: record['Width (in)']?.trim() || '',
-    height: record['Height (in)']?.trim() || '',
-    attributes,
-  };
-}
-
-/**
- * Extract attributes from WooCommerce attribute columns
- * WooCommerce exports attributes as pairs: "Attribute N name" and "Attribute N value(s)"
- */
-function extractAttributes(record: Record<string, string>): Record<string, string> {
-  const attributes: Record<string, string> = {};
-
-  // WooCommerce typically exports up to 20+ attribute pairs
-  for (let i = 1; i <= 20; i++) {
-    const nameKey = `Attribute ${i} name`;
-    const valueKey = `Attribute ${i} value(s)`;
-
-    const name = record[nameKey]?.trim();
-    const value = record[valueKey]?.trim();
-
-    if (name && value) {
-      attributes[name] = value;
-    }
+  for (const [columnName, propertyName] of Object.entries(COLUMN_TO_PROPERTY)) {
+    const value = record[columnName]?.trim() || '';
+    product[propertyName] = value;
   }
 
-  return attributes;
+  return product as ShopifyProduct;
 }
 
 /**
- * Helper to get attribute value with fallback
+ * Validate that a CSV has the expected columns
  */
-export function getAttribute(
-  product: WooCommerceProduct,
-  name: string,
-  defaultValue: string = ''
-): string {
-  return product.attributes[name] || defaultValue;
+export async function validateCSVColumns(filePath: string): Promise<{
+  valid: boolean;
+  missing: string[];
+  extra: string[];
+}> {
+  const parser = createReadStream(filePath).pipe(
+    parse({
+      columns: true,
+      to: 1, // Only read first row to get headers
+    })
+  );
+
+  let headers: string[] = [];
+
+  for await (const record of parser) {
+    headers = Object.keys(record);
+    break;
+  }
+
+  const expectedColumns = Object.keys(COLUMN_TO_PROPERTY);
+  const missing = expectedColumns.filter((col) => !headers.includes(col));
+  const extra = headers.filter((col) => !expectedColumns.includes(col));
+
+  return {
+    valid: missing.length === 0,
+    missing,
+    extra,
+  };
 }

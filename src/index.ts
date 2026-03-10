@@ -1,41 +1,44 @@
 import 'dotenv/config';
-import { parseWooCommerceCSV } from './parser.js';
-import { transformProduct } from './transformer.js';
-import { writeShopifyCSV } from './output.js';
+import { parseProductCSV, validateCSVColumns } from './parser.js';
 import { ShopifyClient } from './shopify.js';
-import type { ShopifyProduct } from './types.js';
 
 function printUsage(): void {
   console.log(`
-JDL Import Tool - WooCommerce to Shopify Product Catalog Import
+JDL Shopify Import Tool
+
+Imports products from a transformed CSV file into Shopify.
 
 Usage:
-  npm run dev -- [options] <input.csv> [output.csv]
+  npm run dev -- <products.csv>
+  npm run dev -- --validate <products.csv>
+  npm run dev -- --dry-run <products.csv>
 
 Options:
-  --import    After generating CSV, also import products to Shopify via Admin API
-  --help      Show this help message
+  --validate   Only validate CSV format, don't import
+  --dry-run    Parse and display products without importing
+  --help       Show this help message
 
-Environment Variables:
-  ANTHROPIC_API_KEY      Required for LLM-based content generation
-  SHOPIFY_STORE_DOMAIN   Required if using --import (e.g., your-store.myshopify.com)
-  SHOPIFY_ACCESS_TOKEN   Required if using --import (Admin API access token)
+Environment Variables (required for import):
+  SHOPIFY_STORE_DOMAIN   Your Shopify store domain (e.g., store.myshopify.com)
+  SHOPIFY_ACCESS_TOKEN   Admin API access token
+
+CSV Format:
+  The input CSV should be generated using an LLM with the transformation prompt.
+  See "catalog creation prompt.md" for the expected format.
 
 Examples:
-  npm run dev -- input.csv                    # Generate output.csv
-  npm run dev -- input.csv products.csv       # Generate products.csv
-  npm run dev -- --import input.csv           # Generate CSV and import to Shopify
+  npm run dev -- products.csv              # Import products to Shopify
+  npm run dev -- --validate products.csv   # Validate CSV format only
+  npm run dev -- --dry-run products.csv    # Preview without importing
 `);
 }
 
-/**
- * Main entry point for the import tool
- */
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
   // Parse flags
-  const importToShopify = args.includes('--import');
+  const validateOnly = args.includes('--validate');
+  const dryRun = args.includes('--dry-run');
   const showHelp = args.includes('--help') || args.includes('-h');
 
   if (showHelp) {
@@ -43,81 +46,90 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // Remove flags from args
+  // Get CSV file path
   const positionalArgs = args.filter((arg) => !arg.startsWith('--'));
+  const csvPath = positionalArgs[0];
 
-  const inputPath = positionalArgs[0] || 'input.csv';
-  const outputPath = positionalArgs[1] || 'output.csv';
-
-  console.log(`Reading WooCommerce CSV from: ${inputPath}`);
-
-  // Validate environment
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.error('Error: ANTHROPIC_API_KEY environment variable is required');
+  if (!csvPath) {
+    console.error('Error: CSV file path is required');
+    printUsage();
     process.exit(1);
   }
 
-  if (importToShopify) {
-    if (!process.env.SHOPIFY_STORE_DOMAIN || !process.env.SHOPIFY_ACCESS_TOKEN) {
-      console.error(
-        'Error: SHOPIFY_STORE_DOMAIN and SHOPIFY_ACCESS_TOKEN are required for --import'
-      );
-      process.exit(1);
-    }
+  // Validate CSV columns
+  console.log(`Validating CSV: ${csvPath}`);
+  const validation = await validateCSVColumns(csvPath);
+
+  if (validation.missing.length > 0) {
+    console.error('\nError: Missing required columns:');
+    validation.missing.forEach((col) => console.error(`  - ${col}`));
+    process.exit(1);
   }
 
-  // Parse input CSV
-  const products = await parseWooCommerceCSV(inputPath);
-  console.log(`Parsed ${products.length} products`);
-
-  // Transform products
-  const transformedProducts: ShopifyProduct[] = [];
-  let processed = 0;
-  let errors = 0;
-
-  for (const product of products) {
-    try {
-      process.stdout.write(
-        `\rTransforming product ${processed + 1}/${products.length}: ${product.sku}`.padEnd(80)
-      );
-
-      const transformed = await transformProduct(product);
-      transformedProducts.push(transformed);
-      processed++;
-    } catch (error) {
-      console.error(`\nError transforming product ${product.sku}:`, error);
-      errors++;
-    }
+  if (validation.extra.length > 0) {
+    console.log('\nNote: Extra columns will be ignored:');
+    validation.extra.forEach((col) => console.log(`  - ${col}`));
   }
 
-  console.log(`\nTransformed ${processed} products (${errors} errors)`);
+  console.log('CSV format valid.\n');
 
-  // Write output CSV
-  await writeShopifyCSV(transformedProducts, outputPath);
-  console.log(`Output written to: ${outputPath}`);
+  if (validateOnly) {
+    console.log('Validation complete.');
+    process.exit(0);
+  }
 
-  // Import to Shopify if requested
-  if (importToShopify) {
-    console.log('\nImporting products to Shopify...');
+  // Parse products
+  console.log('Parsing products...');
+  const products = await parseProductCSV(csvPath);
+  console.log(`Found ${products.length} products.\n`);
 
-    const client = new ShopifyClient();
-    const results = await client.importProducts(
-      transformedProducts,
-      (current, total, sku) => {
-        process.stdout.write(
-          `\rImporting ${current}/${total}: ${sku}`.padEnd(80)
-        );
-      }
+  if (products.length === 0) {
+    console.log('No products to import.');
+    process.exit(0);
+  }
+
+  // Dry run - just show products
+  if (dryRun) {
+    console.log('Dry run - products parsed:\n');
+    for (const product of products) {
+      console.log(`  ${product.sku}: ${product.title}`);
+      console.log(`    Price: $${product.regularPrice}`);
+      console.log(`    Mil Spec: ${product.militarySpecification || 'N/A'}`);
+      console.log(`    URL: /${product.urlHandle}`);
+      console.log('');
+    }
+    console.log('Dry run complete. No products were imported.');
+    process.exit(0);
+  }
+
+  // Validate Shopify credentials
+  if (!process.env.SHOPIFY_STORE_DOMAIN || !process.env.SHOPIFY_ACCESS_TOKEN) {
+    console.error(
+      'Error: SHOPIFY_STORE_DOMAIN and SHOPIFY_ACCESS_TOKEN environment variables are required.'
     );
+    console.error('Set these in your .env file or export them in your shell.');
+    process.exit(1);
+  }
 
-    console.log(`\nImport complete: ${results.success} succeeded`);
+  // Import to Shopify
+  console.log('Importing to Shopify...\n');
 
-    if (results.errors.length > 0) {
-      console.log(`\n${results.errors.length} errors:`);
-      for (const error of results.errors) {
-        console.log(`  - ${error.sku}: ${error.error}`);
-      }
+  const client = new ShopifyClient();
+  const results = await client.importProducts(products, (current, total, sku) => {
+    process.stdout.write(`\r  [${current}/${total}] ${sku}`.padEnd(60));
+  });
+
+  console.log('\n');
+  console.log(`Import complete:`);
+  console.log(`  Succeeded: ${results.success}`);
+  console.log(`  Failed: ${results.errors.length}`);
+
+  if (results.errors.length > 0) {
+    console.log('\nErrors:');
+    for (const error of results.errors) {
+      console.log(`  ${error.sku}: ${error.error}`);
     }
+    process.exit(1);
   }
 }
 

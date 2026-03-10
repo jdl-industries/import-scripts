@@ -1,7 +1,7 @@
 {
-  "name": "jdl-import",
+  "name": "jdl-shopify-import",
   "version": "1.0.0",
-  "description": "WooCommerce to Shopify product catalog import tool",
+  "description": "Shopify product catalog import tool for JDL Industries",
   "type": "module",
   "scripts": {
     "build": "tsc",
@@ -9,10 +9,8 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.52.0",
     "@shopify/shopify-api": "^11.0.0",
     "csv-parse": "^5.5.0",
-    "csv-stringify": "^6.4.0",
     "dotenv": "^16.4.0"
   },
   "devDependencies": {

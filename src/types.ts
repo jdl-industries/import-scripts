@@ -1,21 +1,5 @@
 /**
- * Raw product data parsed from WooCommerce CSV
- */
-export interface WooCommerceProduct {
-  sku: string;
-  name: string;
-  shortDescription: string;
-  description: string;
-  regularPrice: string;
-  weight: string;
-  length: string;
-  width: string;
-  height: string;
-  attributes: Record<string, string>;
-}
-
-/**
- * Transformed product data for Shopify import
+ * Transformed product data from LLM-generated CSV
  */
 export interface ShopifyProduct {
   sku: string;
@@ -44,32 +28,9 @@ export interface ShopifyProduct {
 }
 
 /**
- * Extracted specification data from product descriptions
+ * CSV column headers (must match LLM output format)
  */
-export interface ExtractedSpecs {
-  milSpec: string | null;
-  qpl: string | null;
-  nsn: string | null;
-  certifications: string[];
-  productType: string | null;
-  color: string | null;
-}
-
-/**
- * LLM-generated content for a product
- */
-export interface GeneratedContent {
-  title: string;
-  description: string;
-  pageTitle: string;
-  metaDescription: string;
-  urlHandle: string;
-}
-
-/**
- * Output CSV column headers
- */
-export const OUTPUT_COLUMNS = [
+export const CSV_COLUMNS = [
   'SKU',
   'Title',
   'Description',
@@ -94,3 +55,32 @@ export const OUTPUT_COLUMNS = [
   'Meta Description',
   'URL Handle',
 ] as const;
+
+/**
+ * Map CSV column name to ShopifyProduct property
+ */
+export const COLUMN_TO_PROPERTY: Record<string, keyof ShopifyProduct> = {
+  'SKU': 'sku',
+  'Title': 'title',
+  'Description': 'description',
+  'Regular Price': 'regularPrice',
+  'Weight': 'weight',
+  'Length': 'length',
+  'Width': 'width',
+  'Height': 'height',
+  'Aviation': 'aviation',
+  'Marine': 'marine',
+  'Industrial': 'industrial',
+  'Special Packaging': 'specialPackaging',
+  'Category': 'category',
+  'Is Hazmat': 'isHazmat',
+  'Manufacturer Part Number': 'manufacturerPartNumber',
+  'QPL': 'qpl',
+  'NSN': 'nsn',
+  'Military Specification': 'militarySpecification',
+  'Compliance and Certifications': 'complianceAndCertifications',
+  'Lead Time': 'leadTime',
+  'Page Title': 'pageTitle',
+  'Meta Description': 'metaDescription',
+  'URL Handle': 'urlHandle',
+};

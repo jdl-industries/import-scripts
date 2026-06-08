@@ -9,6 +9,7 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.97.1",
     "@shopify/shopify-api": "^11.0.0",
     "csv-parse": "^5.5.0",
     "dotenv": "^16.4.0"

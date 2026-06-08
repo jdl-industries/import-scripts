@@ -16,19 +16,20 @@ You are transforming a WooCommerce product export into a Shopify-compatible CSV 
 
 The input CSV contains these relevant columns:
 
-| Column Name | Contains |
-|-------------|----------|
-| SKU | Product SKU (e.g., "HZK17176KEP_G") |
-| Name | Product name |
+| Column Name       | Contains                                   |
+| ----------------- | ------------------------------------------ |
+| SKU               | Product SKU (e.g., "HZK17176KEP_G")        |
+| Name              | Product name                               |
 | Short description | Mil spec, QPL info, color (HTML formatted) |
-| Description | Full product description (HTML formatted) |
-| Regular price | Price as number |
-| Weight (lbs) | Weight as number |
-| Length (in) | Length as number |
-| Width (in) | Width as number |
-| Height (in) | Height as number |
+| Description       | Full product description (HTML formatted)  |
+| Regular price     | Price as number                            |
+| Weight (lbs)      | Weight as number                           |
+| Length (in)       | Length as number                           |
+| Width (in)        | Width as number                            |
+| Height (in)       | Height as number                           |
 
 **Attributes** are in paired columns (`Attribute N name` / `Attribute N value(s)`). Extract these values:
+
 - **Manufacturer** - e.g., "HENTZEN"
 - **Vendor SKU** - Manufacturer part number
 - **Barcode1** - Often contains NSN
@@ -40,6 +41,7 @@ The input CSV contains these relevant columns:
 - **Lead time** - e.g., "30 business days" or "Available from stock"
 
 **Embedded in HTML** (Short description / Description fields):
+
 - QPL specs appear as: `<strong><i>QPL:</i></strong> MIL-PRF-23377K, TYPE II, CLASS N`
 - Other specs appear as: `<strong><i>Meets the requirements of:</i></strong> ...`
 - Color appears as: `<strong><i>Color specs:</i></strong> ...`
@@ -59,12 +61,15 @@ SKU,Title,Description,Regular Price,Weight,Length,Width,Height,Aviation,Marine,I
 ## Field Specifications
 
 ### 1. SKU
+
 Copy directly from input.
 
 ### 2. Title
+
 **Format:** `{Manufacturer} {Part Number(s)}, {Short Description}, {MIL-SPEC} {Type} {Class} {(QPL)}`
 
 Rules:
+
 - Title-case the manufacturer name ("HENTZEN" → "Hentzen")
 - Use Vendor SKU for part number(s); separate multiples with slash
 - Short description should be concise (under 6 words) - extract key product type
@@ -74,7 +79,9 @@ Rules:
 **Example:** `Hentzen 17176KEP/16709CEH, Non-Chrome Epoxy Primer, MIL-PRF-23377 Type II Class N (QPL)`
 
 ### 3. Description
+
 Rewrite the product description to be:
+
 - Human-readable (strip all HTML)
 - Professional and SEO-optimized
 - 2-4 sentences covering key features
@@ -83,50 +90,66 @@ Rewrite the product description to be:
 **Example:** `Hentzen's Dark Green Aerospace High Performance Primer 17176KEP/16709CEH, Chromate-Free. This Epoxy Primer has been formulated to have excellent corrosion resistance and meet all the performance requirements of the specification.`
 
 ### 4. Regular Price
+
 Copy directly from input "Regular price" column.
 
 ### 5. Weight
+
 Copy directly from input "Weight (lbs)" column.
 
 ### 6. Length
+
 Copy directly from input "Length (in)" column.
 
 ### 7. Width
+
 Copy directly from input "Width (in)" column.
 
 ### 8. Height
+
 Copy directly from input "Height (in)" column.
 
 ### 9. Aviation
+
 Copy from Aviation attribute: "Yes" or "No"
 
 ### 10. Marine
+
 Copy from Marine attribute: "Yes" or "No"
 
 ### 11. Industrial
+
 Copy from Industrial attribute: "Yes" or "No"
 
 ### 12. Special Packaging
+
 Copy from "Special packaging" attribute: "Yes" or "No"
 
 ### 13. Category
+
 Always use: `Manufacturing`
 
 ### 14. Is Hazmat
+
 Convert Hazardous attribute: "Yes" → `true`, "No" → `false`
 
 ### 15. Manufacturer Part Number
+
 Copy from "Vendor SKU" attribute.
 
 ### 16. QPL
+
 Extract the specification string after "QPL:" in the HTML.
+
 - Only populate if an actual spec follows the tag
 - Leave empty if just "QPL:" with no specification
 
 **Example:** `MIL-PRF-23377K, TYPE II, CLASS N`
 
 ### 17. NSN
+
 Extract National Stock Number from Barcode1 attribute or Description.
+
 - Format: `XXXX-XX-XXX-XXXX`
 - Look for patterns like "NSN 8010-01-582-7280" or "NSN: 8010-01-582-7280"
 - Leave empty if not found
@@ -134,15 +157,20 @@ Extract National Stock Number from Barcode1 attribute or Description.
 **Example:** `8010-01-582-7280`
 
 ### 18. Military Specification
+
 Extract MIL spec from Short description or Description.
+
 - Format: `MIL-{TYPE}-{NUMBER}{VERSION}, Type {X}, Class {X}`
 - Types: PRF, DTL, SPEC, C
 - Normalize format consistently
+- Number, version, type, or class may be optional
 
 **Example:** `MIL-PRF-23377K, Type II, Class N`
 
 ### 19. Compliance and Certifications
+
 Extract NON-MIL-SPEC certifications, semicolon-separated:
+
 - OEM specs: BMS10-11, FMS-1027, etc.
 - Industry standards: MEP 10-059, MEP 10-070
 - Manufacturer qualifications: LMCO EMAP, LMCO FQML-P-23377-7
@@ -151,28 +179,36 @@ Extract NON-MIL-SPEC certifications, semicolon-separated:
 **Example:** `BMS10-11 Type I Class A Grade B; MEP 10-059 Type II; LMCO EMAP`
 
 ### 20. Lead Time
+
 Convert "Lead time" attribute to integer days:
+
 - "30 business days" → `30`
 - "Available from stock" → `0`
 - Extract just the number
 
 ### 21. Page Title
+
 Shortened version of Title for SEO.
-- Maximum 70 characters
+
+- Maximum 70 characters (but ok to exceed if a word or phrase is truncated beyond readability)
 - Keep: manufacturer, part number, mil spec
 - Abbreviate product description if needed
 
 **Example:** `Hentzen 17176KEP, Epoxy Primer, MIL-PRF-23377 Type II (QPL)`
 
 ### 22. Meta Description
+
 Concise product summary for SEO.
-- Maximum 160 characters
+
+- Maximum 160 characters (but ok to exceed if a word or phrase is truncated beyond readability)
 - Focus on key attributes and benefits
 
 **Example:** `Hentzen Dark Green Aerospace Primer 17176KEP/16709CEH. Chromate-free epoxy with excellent corrosion resistance. QPL MIL-PRF-23377 Type II.`
 
 ### 23. URL Handle
+
 Lowercase, dash-separated URL slug.
+
 - Format: `{manufacturer}-{part-number}-{mil-spec}-type-{type}`
 - Only lowercase letters, numbers, and dashes
 - Use primary part number only (before any slash)
@@ -184,6 +220,7 @@ Lowercase, dash-separated URL slug.
 ## Example Transformation
 
 ### Input Row (simplified):
+
 ```
 SKU: HZK17176KEP_G
 Name: HZK17176KEP_G
@@ -202,6 +239,7 @@ Lead time attribute: 90 business days
 ```
 
 ### Output Row:
+
 ```csv
 HZK17176KEP_G,"Hentzen 17176KEP/16709CEH, Dark Green Epoxy Primer, MIL-PRF-23377 Type II Class N (QPL)","Hentzen's Dark Green Aerospace High Performance Primer 17176KEP/16709CEH, Chromate-Free. This Epoxy Primer has been formulated to have excellent corrosion resistance and meet all the performance requirements of the specification.",519.17,23.00,9.00,15.00,9.00,Yes,No,No,Yes,Manufacturing,true,17176KEP - 16709CEH,"MIL-PRF-23377K, TYPE II, CLASS N",,MIL-PRF-23377K Type II Class N,,90,"Hentzen 17176KEP, Dark Green Primer, MIL-PRF-23377 Type II (QPL)","Hentzen Dark Green Aerospace Primer 17176KEP/16709CEH. Chromate-free epoxy with excellent corrosion resistance. QPL MIL-PRF-23377.",hentzen-17176kep-mil-prf-23377-type-ii
 ```

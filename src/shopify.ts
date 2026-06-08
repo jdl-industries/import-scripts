@@ -1,4 +1,4 @@
-import type { ShopifyProduct } from './types.js';
+import type { ShopifyProduct } from "./types.js";
 
 interface ShopifyConfig {
   storeDomain: string;
@@ -17,7 +17,6 @@ interface ProductInput {
     description: string;
   };
   metafields: MetafieldInput[];
-  variants: VariantInput[];
 }
 
 interface MetafieldInput {
@@ -25,13 +24,6 @@ interface MetafieldInput {
   key: string;
   value: string;
   type: string;
-}
-
-interface VariantInput {
-  sku: string;
-  price: string;
-  weight: number;
-  weightUnit: string;
 }
 
 interface GraphQLResponse<T> {
@@ -44,6 +36,13 @@ interface ProductCreateResponse {
     product: {
       id: string;
       handle: string;
+      variants: {
+        edges: Array<{
+          node: {
+            id: string;
+          };
+        }>;
+      };
     } | null;
     userErrors: Array<{
       field: string[];
@@ -57,7 +56,7 @@ interface ProductCreateResponse {
  */
 export class ShopifyClient {
   private config: ShopifyConfig;
-  private apiVersion = '2024-01';
+  private apiVersion = "2024-01";
 
   constructor() {
     const storeDomain = process.env.SHOPIFY_STORE_DOMAIN;
@@ -65,7 +64,7 @@ export class ShopifyClient {
 
     if (!storeDomain || !accessToken) {
       throw new Error(
-        'SHOPIFY_STORE_DOMAIN and SHOPIFY_ACCESS_TOKEN environment variables are required'
+        "SHOPIFY_STORE_DOMAIN and SHOPIFY_ACCESS_TOKEN environment variables are required",
       );
     }
 
@@ -124,6 +123,13 @@ export class ShopifyClient {
           product {
             id
             handle
+            variants(first: 1) {
+              edges {
+                node {
+                  id
+                }
+              }
+            }
           }
           userErrors {
             field
@@ -134,20 +140,78 @@ export class ShopifyClient {
     `;
 
     const input = this.buildProductInput(product);
-    const response = await this.graphql<ProductCreateResponse>(mutation, { input });
+    const response = await this.graphql<ProductCreateResponse>(mutation, {
+      input,
+    });
 
     if (response.data?.productCreate.userErrors.length) {
       const errors = response.data.productCreate.userErrors
-        .map((e) => `${e.field.join('.')}: ${e.message}`)
-        .join(', ');
+        .map((e) => `${e.field.join(".")}: ${e.message}`)
+        .join(", ");
       throw new Error(`Failed to create product: ${errors}`);
     }
 
     if (!response.data?.productCreate.product) {
-      throw new Error('Failed to create product: no product returned');
+      throw new Error(
+        "Failed to create product: no product returned... " +
+          JSON.stringify(response),
+      );
     }
 
-    return response.data.productCreate.product.id;
+    const productId = response.data.productCreate.product.id;
+    const variantId =
+      response.data.productCreate.product.variants.edges[0]?.node.id;
+
+    // Update the default variant with SKU, price, and weight
+    if (variantId) {
+      await this.updateVariant(variantId, product);
+    }
+
+    return productId;
+  }
+
+  /**
+   * Update a variant with SKU, price, and weight
+   */
+  private async updateVariant(
+    variantId: string,
+    product: ShopifyProduct,
+  ): Promise<void> {
+    const mutation = `
+      mutation productVariantUpdate($input: ProductVariantInput!) {
+        productVariantUpdate(input: $input) {
+          productVariant {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const input = {
+      id: variantId,
+      sku: product.sku,
+      price: product.regularPrice || "0",
+      weight: parseFloat(product.weight) || 0,
+      weightUnit: "POUNDS",
+    };
+
+    const response = await this.graphql<{
+      productVariantUpdate: {
+        productVariant: { id: string } | null;
+        userErrors: Array<{ field: string[]; message: string }>;
+      };
+    }>(mutation, { input });
+
+    if (response.data?.productVariantUpdate.userErrors.length) {
+      const errors = response.data.productVariantUpdate.userErrors
+        .map((e) => `${e.field.join(".")}: ${e.message}`)
+        .join(", ");
+      throw new Error(`Failed to update variant: ${errors}`);
+    }
   }
 
   /**
@@ -155,13 +219,20 @@ export class ShopifyClient {
    */
   private async updateProduct(
     productId: string,
-    product: ShopifyProduct
+    product: ShopifyProduct,
   ): Promise<void> {
     const mutation = `
       mutation productUpdate($input: ProductInput!) {
         productUpdate(input: $input) {
           product {
             id
+            variants(first: 1) {
+              edges {
+                node {
+                  id
+                }
+              }
+            }
           }
           userErrors {
             field
@@ -178,16 +249,28 @@ export class ShopifyClient {
 
     const response = await this.graphql<{
       productUpdate: {
-        product: { id: string } | null;
+        product: {
+          id: string;
+          variants: {
+            edges: Array<{ node: { id: string } }>;
+          };
+        } | null;
         userErrors: Array<{ field: string[]; message: string }>;
       };
     }>(mutation, { input });
 
     if (response.data?.productUpdate.userErrors.length) {
       const errors = response.data.productUpdate.userErrors
-        .map((e) => `${e.field.join('.')}: ${e.message}`)
-        .join(', ');
+        .map((e) => `${e.field.join(".")}: ${e.message}`)
+        .join(", ");
       throw new Error(`Failed to update product: ${errors}`);
+    }
+
+    // Also update the variant with SKU, price, and weight
+    const variantId =
+      response.data?.productUpdate.product?.variants.edges[0]?.node.id;
+    if (variantId) {
+      await this.updateVariant(variantId, product);
     }
   }
 
@@ -196,77 +279,100 @@ export class ShopifyClient {
    */
   private buildProductInput(product: ShopifyProduct): ProductInput {
     // Extract manufacturer from title (first word)
-    const vendor = product.title.split(' ')[0] || 'Unknown';
+    const vendor = product.title.split(" ")[0] || "Unknown";
 
     // Build tags from category flags
     const tags: string[] = [];
-    if (product.aviation === 'Yes') tags.push('Aviation');
-    if (product.marine === 'Yes') tags.push('Marine');
-    if (product.industrial === 'Yes') tags.push('Industrial');
-    if (product.isHazmat === 'true') tags.push('Hazmat');
+    const applications: string[] = [];
+    if (product.aviation === "Yes") {
+      tags.push("Aviation");
+      applications.push("Aviation");
+    }
+    if (product.marine === "Yes") {
+      tags.push("Marine");
+      applications.push("Marine");
+    }
+    if (product.industrial === "Yes") {
+      tags.push("Industrial");
+      applications.push("Industrial");
+    }
+    if (product.isHazmat === "true") tags.push("Hazmat");
 
     // Build metafields
     const metafields: MetafieldInput[] = [];
 
     if (product.manufacturerPartNumber) {
       metafields.push({
-        namespace: 'custom',
-        key: 'manufacturer_part_number',
+        namespace: "custom",
+        key: "manufacturer_part_number",
         value: product.manufacturerPartNumber,
-        type: 'single_line_text_field',
+        type: "single_line_text_field",
       });
     }
 
     if (product.qpl) {
+      // QPL is list.metaobject_reference - value must be JSON array of GIDs
+      const qplHandles = product.qpl.split(/;\s*/).filter(Boolean);
       metafields.push({
-        namespace: 'custom',
-        key: 'qpl',
-        value: product.qpl,
-        type: 'single_line_text_field',
+        namespace: "custom",
+        key: "qpl",
+        value: JSON.stringify(qplHandles),
+        type: "list.metaobject_reference",
       });
     }
 
     if (product.nsn) {
       metafields.push({
-        namespace: 'custom',
-        key: 'nsn',
+        namespace: "custom",
+        key: "nsn",
         value: product.nsn,
-        type: 'single_line_text_field',
+        type: "single_line_text_field",
       });
     }
 
     if (product.militarySpecification) {
+      // mil_spec is list.metaobject_reference - value must be JSON array of GIDs
+      const milSpecHandles = product.militarySpecification.split(/;\s*/).filter(Boolean);
       metafields.push({
-        namespace: 'custom',
-        key: 'military_specification',
-        value: product.militarySpecification,
-        type: 'single_line_text_field',
+        namespace: "custom",
+        key: "mil_spec",
+        value: JSON.stringify(milSpecHandles),
+        type: "list.metaobject_reference",
       });
     }
 
     if (product.complianceAndCertifications) {
       metafields.push({
-        namespace: 'custom',
-        key: 'compliance_certifications',
+        namespace: "custom",
+        key: "compliance_certifications",
         value: product.complianceAndCertifications,
-        type: 'single_line_text_field',
+        type: "single_line_text_field",
       });
     }
 
-    if (product.leadTime !== '0') {
+    if (product.leadTime !== "0") {
       metafields.push({
-        namespace: 'custom',
-        key: 'lead_time_days',
+        namespace: "custom",
+        key: "lead_time",
         value: product.leadTime,
-        type: 'number_integer',
+        type: "single_line_text_field",
+      });
+    }
+
+    if (applications.length) {
+      metafields.push({
+        namespace: "custom",
+        key: "applications",
+        value: JSON.stringify(applications),
+        type: "list.single_line_text_field",
       });
     }
 
     metafields.push({
-      namespace: 'custom',
-      key: 'is_hazmat',
+      namespace: "custom",
+      key: "is_hazmat",
       value: product.isHazmat,
-      type: 'boolean',
+      type: "boolean",
     });
 
     return {
@@ -281,14 +387,6 @@ export class ShopifyClient {
         description: product.metaDescription,
       },
       metafields,
-      variants: [
-        {
-          sku: product.sku,
-          price: product.regularPrice || '0',
-          weight: parseFloat(product.weight) || 0,
-          weightUnit: 'POUNDS',
-        },
-      ],
     };
   }
 
@@ -297,22 +395,22 @@ export class ShopifyClient {
    */
   private async graphql<T>(
     query: string,
-    variables: Record<string, unknown> = {}
+    variables: Record<string, unknown> = {},
   ): Promise<GraphQLResponse<T>> {
     const url = `https://${this.config.storeDomain}/admin/api/${this.apiVersion}/graphql.json`;
 
     const response = await fetch(url, {
-      method: 'POST',
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': this.config.accessToken,
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": this.config.accessToken,
       },
       body: JSON.stringify({ query, variables }),
     });
 
     if (!response.ok) {
       throw new Error(
-        `Shopify API error: ${response.status} ${response.statusText}`
+        `Shopify API error: ${response.status} ${response.statusText}`,
       );
     }
 
@@ -324,8 +422,11 @@ export class ShopifyClient {
    */
   async importProducts(
     products: ShopifyProduct[],
-    onProgress?: (current: number, total: number, sku: string) => void
-  ): Promise<{ success: number; errors: Array<{ sku: string; error: string }> }> {
+    onProgress?: (current: number, total: number, sku: string) => void,
+  ): Promise<{
+    success: number;
+    errors: Array<{ sku: string; error: string }>;
+  }> {
     const results = {
       success: 0,
       errors: [] as Array<{ sku: string; error: string }>,

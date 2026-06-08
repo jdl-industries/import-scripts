@@ -25,6 +25,8 @@ const FIELD_MAP = {
   'Attribute 1 value(s)': { shopifyField: 'color', type: 'option', compare: 'string', skipCompare: true },
   'Attribute 8 value(s)': { shopifyField: 'manufacturer_part_number', type: 'metafield', namespace: 'custom', compare: 'string' },
   'Attribute 12 value(s)': { shopifyField: 'is_hazmat', type: 'metafield', namespace: 'custom', compare: 'string' },
+  'Attribute 18 value(s)': { shopifyField: 'compareAtPrice', type: 'variant', compare: 'number' },
+  'Attribute 19 value(s)': { shopifyField: 'cost', type: 'inventoryItem', compare: 'number' },
 };
 
 // --- CLI Argument Parsing ---
@@ -190,12 +192,16 @@ async function findProductBySKU(sku) {
             id
             sku
             price
+            compareAtPrice
             selectedOptions {
               name
               value
             }
             inventoryItem {
               id
+              unitCost {
+                amount
+              }
               measurement {
                 weight {
                   value
@@ -330,12 +336,20 @@ function getShopifyValue(variant, fieldConfig) {
       if (fieldConfig.shopifyField === 'price') {
         return variant.price;
       }
+      if (fieldConfig.shopifyField === 'compareAtPrice') {
+        return variant.compareAtPrice;
+      }
       if (fieldConfig.shopifyField === 'weight') {
         return variant.inventoryItem?.measurement?.weight?.value;
       }
       break;
     case 'inventory':
       return variant.inventoryQuantity;
+    case 'inventoryItem':
+      if (fieldConfig.shopifyField === 'cost') {
+        return variant.inventoryItem?.unitCost?.amount;
+      }
+      break;
     case 'metafield':
       return variant.metafieldsMap?.[fieldConfig.shopifyField];
     case 'option':
@@ -346,13 +360,15 @@ function getShopifyValue(variant, fieldConfig) {
 
 function detectChanges(row, variant, syncAll = false) {
   const changes = {
-    variant: {},      // price, weight
+    variant: {},      // price, weight, compareAtPrice
     inventory: null,  // stock quantity
+    inventoryItem: {},// cost
     metafields: [],   // custom metafields
     options: {},      // color, etc.
   };
   let hasComparableChanges = false;
   const pendingSkipCompareFields = []; // Fields we can't compare, add later if needed
+  let hasCompareAtPrice = false; // Track if we're setting compareAtPrice
 
   // Helper to add a field change
   function addChange(fieldConfig, csvValue) {
@@ -360,6 +376,9 @@ function detectChanges(row, variant, syncAll = false) {
       case 'variant':
         if (fieldConfig.shopifyField === 'price') {
           changes.variant.price = csvValue;
+        } else if (fieldConfig.shopifyField === 'compareAtPrice') {
+          changes.variant.compareAtPrice = csvValue;
+          hasCompareAtPrice = true;
         } else if (fieldConfig.shopifyField === 'weight') {
           changes.variant.weight = parseFloat(csvValue);
           changes.variant.weightUnit = fieldConfig.unit;
@@ -367,6 +386,11 @@ function detectChanges(row, variant, syncAll = false) {
         break;
       case 'inventory':
         changes.inventory = parseInt(csvValue, 10);
+        break;
+      case 'inventoryItem':
+        if (fieldConfig.shopifyField === 'cost') {
+          changes.inventoryItem.cost = parseFloat(csvValue);
+        }
         break;
       case 'metafield':
         if (fieldConfig.compare === 'dimension') {
@@ -438,6 +462,16 @@ function detectChanges(row, variant, syncAll = false) {
     }
   }
 
+  // If compareAtPrice is being set, also set the surcharge indicator metafield
+  if (hasCompareAtPrice) {
+    changes.metafields.push({
+      namespace: 'custom',
+      key: 'compare_at_indicates_surcharge',
+      value: 'true',
+      type: 'boolean'
+    });
+  }
+
   const hasChanges = hasComparableChanges || (syncAll && pendingSkipCompareFields.length > 0);
 
   return { hasChanges, changes };
@@ -450,6 +484,9 @@ async function updateVariantFields(variantId, productId, variantChanges) {
   const variantInput = { id: variantId };
   if (variantChanges.price !== undefined) {
     variantInput.price = variantChanges.price;
+  }
+  if (variantChanges.compareAtPrice !== undefined) {
+    variantInput.compareAtPrice = variantChanges.compareAtPrice;
   }
   if (variantChanges.weight !== undefined) {
     variantInput.weight = variantChanges.weight;
@@ -528,6 +565,40 @@ async function updateInventory(inventoryItemId, locationId, quantity) {
   }
 }
 
+async function updateInventoryItemCost(inventoryItemId, cost) {
+  if (cost === null || cost === undefined) return;
+
+  const mutation = `
+    mutation inventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
+      inventoryItemUpdate(id: $id, input: $input) {
+        inventoryItem {
+          id
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const result = await shopifyGraphQL(mutation, {
+    id: inventoryItemId,
+    input: {
+      cost: cost
+    }
+  });
+
+  if (result.errors) {
+    throw new Error(`GraphQL errors (cost): ${JSON.stringify(result.errors)}`);
+  }
+
+  const userErrors = result.data?.inventoryItemUpdate?.userErrors || [];
+  if (userErrors.length > 0) {
+    throw new Error(`User errors (cost): ${JSON.stringify(userErrors)}`);
+  }
+}
+
 async function updateMetafields(ownerId, metafields) {
   if (metafields.length === 0) return;
 
@@ -568,6 +639,7 @@ async function updateMetafields(ownerId, metafields) {
 async function applyChanges(variant, changes, locationId) {
   await updateVariantFields(variant.id, variant.product.id, changes.variant);
   await updateInventory(variant.inventoryItem.id, locationId, changes.inventory);
+  await updateInventoryItemCost(variant.inventoryItem.id, changes.inventoryItem?.cost);
   await updateMetafields(variant.id, changes.metafields);
 }
 
@@ -576,7 +648,10 @@ function describeChanges(changes) {
   const parts = [];
 
   if (changes.variant.price !== undefined) {
-    parts.push(`price: ${changes.variant.price}`);
+    parts.push(`price: $${changes.variant.price}`);
+  }
+  if (changes.variant.compareAtPrice !== undefined) {
+    parts.push(`compareAtPrice: $${changes.variant.compareAtPrice}`);
   }
   if (changes.variant.weight !== undefined) {
     parts.push(`weight: ${changes.variant.weight} lbs`);
@@ -584,9 +659,14 @@ function describeChanges(changes) {
   if (changes.inventory !== null && changes.inventory !== undefined) {
     parts.push(`stock: ${changes.inventory}`);
   }
+  if (changes.inventoryItem?.cost !== undefined) {
+    parts.push(`cost: $${changes.inventoryItem.cost}`);
+  }
   for (const mf of changes.metafields) {
     if (mf.key === 'tiered_pricing') {
       parts.push('tiered pricing');
+    } else if (mf.key === 'compare_at_indicates_surcharge') {
+      parts.push('surcharge flag: true');
     } else if (mf.type === 'dimension') {
       // Parse dimension JSON for nicer display
       try {

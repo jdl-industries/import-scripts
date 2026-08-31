@@ -25,6 +25,7 @@
  *   --date <date>    Override the {date} stamp (default: today)
  *   --dry-run        Report only, write nothing
  *   --verbose        Per-SKU change detail
+ *   --changed-only   Narrow updated-products to just the rows that changed
  */
 
 import fs from "fs";
@@ -419,6 +420,8 @@ Options:
   --date <date>    Override the {date} stamp (default: today)
   --dry-run        Report only, write nothing
   --verbose        Per-SKU change detail
+  --changed-only   Narrow updated-products to just the rows that changed
+                   (default mirrors the baseline row-for-row)
 
 The baseline MUST be a Matrixify export. A Shopify admin export has no
 variant-metafield columns, so most fields would have nothing to diff against.
@@ -432,6 +435,10 @@ variant-metafield columns, so most fields would have nothing to diff against.
   };
   const dryRun = args.includes("--dry-run");
   const verbose = args.includes("--verbose");
+  // updated-products mirrors the baseline row-for-row by default, so it can be
+  // diffed against it directly. Every row already carries complete current
+  // values (a blank cell would clear the field), so unchanged rows cost little.
+  const changedOnly = args.includes("--changed-only");
   const outdir = flag("--outdir", "output");
   const now = new Date();
   const date = flag(
@@ -568,7 +575,29 @@ variant-metafield columns, so most fields would have nothing to diff against.
     {
       const sku = normalizeSku(target[MATRIXIFY.skuCol]);
       const amRow = sku ? amBySku.get(sku) : null;
-      if (!amRow) continue;
+
+      // A baseline row with no AccountMate match is a discontinued SKU. It gets
+      // no changes, but is still carried so the file mirrors the baseline
+      // row-for-row and stays diffable against it. Writing its current values
+      // back is a no-op; retiring it is handled via deleted-products.
+      if (!amRow) {
+        if (changedOnly) continue;
+        const passthrough = {
+          [MATRIXIFY.handleCol]: target[MATRIXIFY.handleCol],
+          [MATRIXIFY.commandCol]: MATRIXIFY.command,
+          [MATRIXIFY.variantCommandCol]: MATRIXIFY.command,
+          [MATRIXIFY.skuCol]: target[MATRIXIFY.skuCol],
+        };
+        for (const col of managedColumns) {
+          if (passthrough[col] === undefined) passthrough[col] = target[col] ?? "";
+        }
+        if (target["ID"]) passthrough["ID"] = target["ID"];
+        if (target["Variant ID"]) passthrough["Variant ID"] = target["Variant ID"];
+        passthrough.__changed = "";
+        updatedRows.push(passthrough);
+        continue;
+      }
+
       const { changes, ratcheted, undiffable, hasChanges } = detectChanges(
         amRow,
         target,
@@ -578,7 +607,7 @@ variant-metafield columns, so most fields would have nothing to diff against.
       undiffable.forEach((c) => undiffableCols.add(c));
       if (!hasChanges) {
         unchanged++;
-        continue;
+        if (changedOnly) continue;
       }
       // Matrixify uses a column's VALUE if the column is present -- a blank cell
       // CLEARS the field, it does not mean "leave alone". So every managed
@@ -600,7 +629,7 @@ variant-metafield columns, so most fields would have nothing to diff against.
       if (target["Variant ID"]) row["Variant ID"] = target["Variant ID"];
       row.__changed = Object.keys(changes).join("; ");
       updatedRows.push(row);
-      if (verbose) console.log(`  UPDATE ${sku}: ${row.__changed}`);
+      if (verbose && hasChanges) console.log(`  UPDATE ${sku}: ${row.__changed}`);
     }
   }
 
@@ -741,7 +770,12 @@ variant-metafield columns, so most fields would have nothing to diff against.
   // --- report -------------------------------------------------------------
   console.log("--- Summary ---");
   console.log(`  deleted-products : ${deletedRows.length} rows`);
-  console.log(`  updated-products : ${updatedRows.length} changed rows (${unchanged} variants unchanged)`);
+  const changedRowCount = updatedRows.filter((r) => r.__changed).length;
+  console.log(
+    `  updated-products : ${updatedRows.length} rows -- ${changedRowCount} changed, ` +
+      `${updatedRows.length - changedRowCount} unchanged` +
+      (changedOnly ? " [--changed-only]" : ` (mirrors the ${baseRows.length}-row baseline)`),
+  );
   console.log(`  new-products     : ${newRows.length} rows`);
   console.log(`      into existing products : ${newRows.length - triage.noHandle}`);
   console.log(`      standalone drafts      : ${triage.noHandle}`);

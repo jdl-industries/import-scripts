@@ -38,6 +38,7 @@ node sync-matrixify.js "AccountMate Export.csv" "matrixify-export.csv"
 | `--date <date>` | Override the `{date}` stamp |
 | `--dry-run` | Report only, write nothing |
 | `--verbose` | Per-SKU change detail |
+| `--changed-only` | Narrow `updated-products` to just the changed rows (default mirrors the baseline) |
 
 ## Blank cells CLEAR data
 
@@ -59,8 +60,20 @@ existing product, its row must echo back that product's `Title`, `Body HTML`,
 import blanks them. That was 204 cells across 34 live products before it was
 caught.
 
-Rows *not* in the file are untouched, so emitting only changed rows is still
-safe; the hazard is confined to cells inside included rows.
+Rows *not* in the file are untouched; the hazard is confined to cells inside
+included rows.
+
+### updated-products mirrors the baseline
+
+Same row count, same row order, same identities — so it can be diffed against the
+Matrixify export to see exactly what will change. Rows already have to carry
+complete current values anyway (blank clears), so unchanged rows cost almost
+nothing.
+
+Rows whose SKU is absent from AccountMate are carried through unchanged rather
+than dropped, keeping the mirror 1:1. Retiring them is `deleted-products`' job.
+
+`--changed-only` narrows the file when you want a lighter import.
 
 ## Row order and grouping
 

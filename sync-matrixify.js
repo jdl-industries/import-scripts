@@ -33,10 +33,13 @@ import path from "path";
 import {
   ATTRIBUTE_SLOTS,
   SURCHARGE,
-  PREFIX_TO_HANDLE,
   UOM_TO_SIZE,
-  SKU_SUFFIX_TO_SIZE,
-  SKU_SUFFIX_ORDER,
+  SKU_SUFFIX_SIZE_OVERRIDE,
+  SKU_SUFFIX_OVERRIDE_ORDER,
+  SIZE_METAOBJECT,
+  SIZE_METAFIELD_COL,
+  SIZE_VOCABULARY,
+  NEW_PRODUCT_HANDLE,
   COLOR_PATTERNS,
   COLOR_SCOPE_CONFIDENCE,
   COLOR_MAP_FILE,
@@ -219,6 +222,38 @@ function extractColor(shortDescription) {
   return null;
 }
 
+/**
+ * Titles for new products, from new-product-titles.csv.
+ *
+ * AccountMate's Name field is just the SKU, so a title cannot be derived from
+ * the data. This map is authored once per product and read back on every run --
+ * the same handoff shape as the colour map. "Confirmed Title" wins if set,
+ * otherwise "Drafted Title" is used.
+ */
+const CONTENT_MAP_FILE = "new-product-content.csv";
+
+/**
+ * Authored handle / title / body for new products, keyed by SKU. Each field has
+ * a "Confirmed" column that wins over the "Drafted" one, so hand edits survive
+ * regeneration.
+ */
+function loadContentMap(file) {
+  if (!fs.existsSync(file)) return new Map();
+  const { rows } = parseCSV(fs.readFileSync(file, "utf-8"));
+  const m = new Map();
+  const pickField = (r, name) => (r[`Confirmed ${name}`] || "").trim() || (r[`Drafted ${name}`] || "").trim();
+  for (const r of rows) {
+    const k = normalizeSku(r.SKU);
+    if (!k) continue;
+    m.set(k, {
+      handle: pickField(r, "Handle"),
+      title: pickField(r, "Title"),
+      body: pickField(r, "Body HTML"),
+    });
+  }
+  return m;
+}
+
 const COLOR_MAP_HEADERS = [
   "SKU",
   "Confirmed Color",
@@ -272,6 +307,9 @@ function hydrateBaseline(rows, headers) {
 
 // Product-level columns that must be echoed back when adding a variant to an
 // existing product, because a blank cell would clear them.
+const MIGRATION_COLOUR_PATTERN_COL = "Metafield: shopify.color-pattern [list.metaobject_reference]";
+const MIGRATION_SAE_COL = "Metafield: custom.sae_color [single_line_text_field]";
+
 const PRODUCT_LEVEL_CARRY = [
   "Title",
   "Body HTML",
@@ -280,30 +318,88 @@ const PRODUCT_LEVEL_CARRY = [
   "Status",
   "Published",
   "Metafield: custom.compare_at_indicates_surcharge [boolean]",
+  // Colour lives in the output header for NEW products, so add-variant rows
+  // must echo it back -- a blank cell would clear the colour of a live product.
+  MIGRATION_COLOUR_PATTERN_COL,
+  MIGRATION_SAE_COL,
+  SIZE_METAFIELD_COL,
 ];
 
 // --- grouping --------------------------------------------------------------
 
-function resolveHandle(sku) {
-  const s = normalizeSku(sku).replace(/\s+/g, "");
-  let best = null;
-  for (const prefix of Object.keys(PREFIX_TO_HANDLE)) {
-    const p = prefix.toUpperCase().replace(/\s+/g, "");
-    if (s.startsWith(p) && (!best || p.length > best.length)) best = p;
-  }
-  return best ? PREFIX_TO_HANDLE[best] : null;
+/**
+ * Product identity under the current architecture: one product per colour /
+ * chemistry, with Size as the only variant axis. The product is therefore the
+ * SKU with its size token stripped.
+ *
+ *   HZK31136WPX-T1          -> HZK31136WPX-T1   (Gallon)
+ *   HZK31136WPX-T1 QT/KT    -> HZK31136WPX-T1   (Quart)
+ *   HZK31136WPX-T1 4OZ/K    -> HZK31136WPX-T1   (4oz Kit)
+ *
+ * This replaces the old PREFIX_TO_HANDLE table, which existed only to group
+ * colours as variants of a shared product.
+ */
+const SIZE_TOKENS = [
+  ...SKU_SUFFIX_OVERRIDE_ORDER,
+  "-LVOC KIT",
+  " KIT",
+  "-2G",
+  "GL/KT",
+  "_2G",
+  "_G",
+  "GL",
+  "G1",
+  "G2",
+  "G4",
+  "GK-1",
+  "GK-2",
+  "G-1",
+].sort((a, b) => b.length - a.length);
+
+function skuBase(sku) {
+  const v = normalizeSku(sku);
+  for (const t of SIZE_TOKENS) if (v.endsWith(t)) return v.slice(0, -t.length).trim();
+  return v;
 }
 
+/**
+ * Size resolution, AccountMate first:
+ *   1. an unambiguous SKU suffix (UoM is coarser -- "KIT" covers both a
+ *      5-gallon and a 1.25-gallon kit)
+ *   2. the Unit of Measure map
+ * Unresolved is reported, never defaulted: a wrong size mislabels what ships.
+ */
 function resolveSize(sku, amRow) {
-  const uom = getAttr(amRow, "Unit of Measure").toUpperCase();
-  if (UOM_TO_SIZE[uom]) return { value: UOM_TO_SIZE[uom], source: "uom" };
   const s = normalizeSku(sku);
-  for (const token of SKU_SUFFIX_ORDER) {
+  for (const token of SKU_SUFFIX_OVERRIDE_ORDER) {
     if (s.endsWith(token.toUpperCase())) {
-      return { value: SKU_SUFFIX_TO_SIZE[token], source: "sku-suffix" };
+      return { value: SKU_SUFFIX_SIZE_OVERRIDE[token], source: "SKU suffix" };
     }
   }
+  if (amRow) {
+    const uom = getAttr(amRow, "Unit of Measure").toUpperCase();
+    if (UOM_TO_SIZE[uom]) return { value: UOM_TO_SIZE[uom], source: "AccountMate UoM" };
+    if (uom) return { value: "", source: "", unmappedUom: uom };
+  }
   return { value: "", source: "" };
+}
+
+/** hentzen-{mpn}-{spec}, per the agreed scheme. */
+function buildHandle(amRow, sku) {
+  // Prefer the AccountMate Vendor SKU, falling back to the SKU base. Strip any
+  // trailing size token -- "PG-21-G2 Q2" would otherwise put a size in the URL,
+  // which is wrong now that size is a variant.
+  // Derive the MPN from the SKU, not the Vendor SKU field: that field carries
+  // real errors ("PAINT", "JDL-12", and AXTF-1-BR1 listed as AXTS-1-BR1).
+  // The SKU is the client's canonical identifier.
+  let mpn = NEW_PRODUCT_HANDLE.normalizeMpn(skuBase(sku));
+  const slug = (v) =>
+    String(v)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  const spec = NEW_PRODUCT_HANDLE.specFrom(amRow);
+  return [NEW_PRODUCT_HANDLE.prefix, slug(mpn), spec ? slug(spec) : ""].filter(Boolean).join("-");
 }
 
 // ===========================================================================
@@ -508,6 +604,9 @@ variant-metafield columns, so most fields would have nothing to diff against.
   console.log(`Matched: ${matched.length}   New: ${newSkus.length}   Deleted: ${deletedSkus.length}\n`);
 
   // --- colour map ---------------------------------------------------------
+  // Titles live alongside the script, not in outdir -- they are authored once
+  // and version-controlled, unlike the per-run outputs.
+  const contentMap = loadContentMap(CONTENT_MAP_FILE);
   const colorMapPath = path.join(outdir, COLOR_MAP_FILE);
   const colorMap = loadColorMap(colorMapPath);
   // Seed from variants already live, where the option value is a colour.
@@ -545,6 +644,7 @@ variant-metafield columns, so most fields would have nothing to diff against.
     added++;
   }
   const confirmed = [...colorMap.values()].filter((r) => (r["Confirmed Color"] || "").trim()).length;
+  console.log(`Content:    ${contentMap.size} authored products (${CONTENT_MAP_FILE})`);
   console.log(`Colour map: ${colorMap.size} entries (${seeded} seeded, ${added} newly queued)`);
   console.log(`  confirmed: ${confirmed}   pending: ${colorMap.size - confirmed}\n`);
 
@@ -634,105 +734,149 @@ variant-metafield columns, so most fields would have nothing to diff against.
   }
 
   // --- new ----------------------------------------------------------------
+  // Under colour-as-product / size-as-variant, new SKUs split two ways:
+  //   * another SIZE of a product that already exists -> add a variant
+  //   * a new colour / chemistry                      -> create a product
+  // Grouping by SKU base decides which, and groups several new sizes of the
+  // same new product into one product with several variants.
   const newRows = [];
-  const triage = { noHandle: 0, noColor: 0, noSize: 0, handleNotInBaseline: 0 };
+  const triage = { newProducts: 0, addedVariants: 0, noSize: 0, noColour: 0 };
   let defaultedSurcharges = 0;
 
-  for (const { sku, amRow } of newSkus) {
-    const handle = resolveHandle(sku);
-    const size = resolveSize(sku, amRow);
-    const color = (colorMap.get(sku)?.["Confirmed Color"] || "").trim();
-    const sibling = handle ? baseRows.find((r) => r[MATRIXIFY.handleCol] === handle) : null;
-    // Count what actually happens: a prefix rule only helps if the product it
-    // names is present in the baseline.
-    if (!sibling) triage.noHandle++;
-    if (!color) triage.noColor++;
-    if (!size.value) triage.noSize++;
-    if (handle && !sibling) triage.handleNotInBaseline++;
-    const row = {
-      [MATRIXIFY.commandCol]: MATRIXIFY.command,
-      [MATRIXIFY.variantCommandCol]: MATRIXIFY.command,
-      [MATRIXIFY.skuCol]: amRow.SKU,
-    };
-
-    if (sibling) {
-      // Add as a variant of an existing product. The row needs no sibling rows,
-      // but every PRODUCT-level column in the file must carry the product's
-      // current value: a blank cell clears the field, so leaving Title or
-      // Body HTML empty here would wipe them on 34 live products.
-      row[MATRIXIFY.handleCol] = handle;
-      row["Option1 Name"] = sibling["Option1 Name"] || "Color";
-      row["Option1 Value"] = color || NEEDS_COLOR_PLACEHOLDER;
-      row["Option2 Name"] = sibling["Option2 Name"] || "Size";
-      row["Option2 Value"] = size.value || "NEEDS-SIZE";
-      // `sibling` is hydrated, so these are the product's real values even when
-      // the matched export row was not the product's top row.
-      for (const col of PRODUCT_LEVEL_CARRY) {
-        if ((row[col] ?? "") === "" && (sibling[col] ?? "") !== "") row[col] = sibling[col];
-      }
-    } else {
-      row[MATRIXIFY.handleCol] = slugify(amRow.Name || sku);
-      row["Title"] = (amRow.Name || sku).trim();
-      row["Body HTML"] = amRow.Description || "";
-      row["Option1 Name"] = "Title";
-      row["Option1 Value"] = "Default Title";
-      row["Status"] = NEW_PRODUCT_DEFAULTS.Status;
-      row["Published"] = NEW_PRODUCT_DEFAULTS.Published;
-      row["Vendor"] = getAttr(amRow, "Manufacturer") || NEW_PRODUCT_DEFAULTS.Vendor;
-      row["Variant Taxable"] = "true";
-      row["Variant Inventory Tracker"] = "shopify";
-      row["Variant Inventory Policy"] = "deny";
-      row["Variant Fulfillment Service"] = "manual";
-      row["Variant Requires Shipping"] = "true";
-    }
-
-    for (const f of MATRIXIFY_FIELD_MAP) {
-      const raw = getSource(amRow, f.source);
-      if (isBlank(raw, f.treatZeroAsBlank) && f.blankPolicy !== "overwrite") continue;
-      const value = f.transform ? f.transform(raw) : raw;
-      if (value !== "" && value != null) {
-        row[f.col] = value;
-        if (f.companions) Object.assign(row, f.companions);
-      }
-    }
-
-    const pricing = computePricing(amRow, { allowDefaultSurcharge: true });
-    if (pricing.price) row[MATRIXIFY.priceCol] = pricing.price;
-    if (pricing.hasSurcharge) {
-      row[MATRIXIFY.compareAtCol] = pricing.compareAt;
-      row[MATRIXIFY.indicatorCol] = "true";
-    }
-    if (pricing.defaulted) defaultedSurcharges++;
-
-    row.__handleSource = sibling ? "prefix-rule" : "standalone-draft";
-    row.__needsReview = [
-      !handle ? "handle" : "",
-      !color ? "color" : "",
-      !size.value ? "size" : "",
-      !pricing.price ? "price" : "",
-      !row["Variant Weight"] ? "weight" : "",
-    ]
-      .filter(Boolean)
-      .join("; ");
-    newRows.push(row);
+  // Existing products, indexed by the SKU base they represent.
+  const baseToProduct = new Map();
+  for (const r of baseRows) {
+    const k = skuBase(r[MATRIXIFY.skuCol]);
+    if (k && !baseToProduct.has(k)) baseToProduct.set(k, r);
   }
 
-  // Group the additions so each product's rows are contiguous, ordered by where
-  // that product sits in the baseline. Matrixify rejects a Handle that reappears
-  // after other rows, and brand-new products go last.
-  const handleOrder = new Map();
-  baseRows.forEach((r, i) => {
-    if (!handleOrder.has(r[MATRIXIFY.handleCol])) handleOrder.set(r[MATRIXIFY.handleCol], i);
-  });
-  newRows.sort((a, b) => {
-    const ha = a[MATRIXIFY.handleCol];
-    const hb = b[MATRIXIFY.handleCol];
-    if (ha === hb) return 0;
-    const ia = handleOrder.has(ha) ? handleOrder.get(ha) : Infinity;
-    const ib = handleOrder.has(hb) ? handleOrder.get(hb) : Infinity;
-    if (ia !== ib) return ia - ib;
-    return ha < hb ? -1 : 1; // stable grouping for brand-new handles
-  });
+  // Group the new SKUs by product.
+  const newGroups = new Map();
+  for (const { sku, amRow } of newSkus) {
+    const k = skuBase(sku);
+    if (!newGroups.has(k)) newGroups.set(k, []);
+    newGroups.get(k).push({ sku, amRow });
+  }
+
+  for (const [base, members] of newGroups) {
+    const existing = baseToProduct.get(base);
+    // Sizes this product will have once the new SKUs land: the existing
+    // variants' sizes plus the new ones. custom.size is a list replaced
+    // wholesale, so it must cover all of them.
+    const sizes = new Set();
+    if (existing) {
+      baseRows
+        .filter((r) => r[MATRIXIFY.handleCol] === existing[MATRIXIFY.handleCol])
+        .forEach((r) => {
+          const v = (r["Option1 Value"] || "").trim();
+          if (v) sizes.add(v);
+        });
+    }
+
+    // Title is a PRODUCT-level field, so it must be resolved once for the group
+    // and written identically on every row. Looking it up per-variant left the
+    // second size of a new product titled with its raw SKU, which -- since a
+    // present-but-different value overwrites -- would have clobbered the real
+    // title set by the first row.
+    const groupContent = members.map(({ sku }) => contentMap.get(sku)).find((c) => c && c.title) || null;
+
+    const memberRows = [];
+    for (const { sku, amRow } of members) {
+      const size = resolveSize(sku, amRow);
+      if (!size.value) triage.noSize++;
+      else sizes.add(size.value);
+
+      const row = {
+        [MATRIXIFY.commandCol]: MATRIXIFY.command,
+        [MATRIXIFY.variantCommandCol]: MATRIXIFY.command,
+        [MATRIXIFY.skuCol]: amRow.SKU,
+        "Option1 Name": "Size",
+        "Option1 Value": size.value || "NEEDS-SIZE",
+      };
+
+      if (existing) {
+        // Adding a variant: every PRODUCT-level column present must carry the
+        // product's current value, since a blank cell clears the field.
+        row[MATRIXIFY.handleCol] = existing[MATRIXIFY.handleCol];
+        for (const col of PRODUCT_LEVEL_CARRY) {
+          if ((row[col] ?? "") === "" && (existing[col] ?? "") !== "") row[col] = existing[col];
+        }
+      } else {
+        const colour = (colorMap.get(sku)?.["Confirmed Color"] || "").trim();
+        if (!colour) triage.noColour++;
+        // An authored handle wins: it carries the spec exactly as the confirmed
+        // title does, which buildHandle can only approximate from the raw
+        // description text.
+        row[MATRIXIFY.handleCol] = groupContent?.handle || buildHandle(amRow, sku);
+        // AccountMate's Name is just the SKU, so an authored title is the only
+        // usable source. Falls back to the SKU and is flagged for review.
+        row["Title"] = groupContent?.title || (amRow.Name || sku).trim();
+        row["Body HTML"] = groupContent?.body || amRow.Description || "";
+        row["Status"] = NEW_PRODUCT_DEFAULTS.Status;
+        row["Published"] = NEW_PRODUCT_DEFAULTS.Published;
+        row["Vendor"] = getAttr(amRow, "Manufacturer") || NEW_PRODUCT_DEFAULTS.Vendor;
+        row["Variant Taxable"] = "true";
+        row["Variant Inventory Tracker"] = "shopify";
+        row["Variant Inventory Policy"] = "deny";
+        row["Variant Fulfillment Service"] = "manual";
+        row["Variant Requires Shipping"] = "true";
+        // Colour is a METAFIELD now, not a variant option, so an unconfirmed
+        // colour no longer blocks the import -- it just leaves the field unset.
+        if (colour) {
+          row[MIGRATION_COLOUR_PATTERN_COL] = colour.startsWith("shopify--color-pattern.")
+            ? colour
+            : `shopify--color-pattern.${colour}`;
+          if (/^\d{5}$/.test(colour)) row[MIGRATION_SAE_COL] = colour;
+        }
+      }
+
+      for (const f of MATRIXIFY_FIELD_MAP) {
+        const raw = getSource(amRow, f.source);
+        if (isBlank(raw, f.treatZeroAsBlank) && f.blankPolicy !== "overwrite") continue;
+        const value = f.transform ? f.transform(raw) : raw;
+        if (value !== "" && value != null) {
+          row[f.col] = value;
+          if (f.companions) Object.assign(row, f.companions);
+        }
+      }
+
+      const pricing = computePricing(amRow, { allowDefaultSurcharge: true });
+      if (pricing.price) row[MATRIXIFY.priceCol] = pricing.price;
+      if (pricing.hasSurcharge) {
+        row[MATRIXIFY.compareAtCol] = pricing.compareAt;
+        row[MATRIXIFY.indicatorCol] = "true";
+      }
+      if (pricing.defaulted) defaultedSurcharges++;
+
+      row.__action = existing ? "add-variant" : "new-product";
+      row.__sizeSource = size.source;
+      row.__needsReview = [
+        !size.value ? "size" : "",
+        !existing && !groupContent?.title ? "title" : "",
+        !existing && !groupContent?.body ? "description" : "",
+        !existing && !(colorMap.get(sku)?.["Confirmed Color"] || "").trim() ? "colour" : "",
+        !pricing.price ? "price" : "",
+        !row["Variant Weight"] ? "weight" : "",
+      ]
+        .filter(Boolean)
+        .join("; ");
+      memberRows.push(row);
+    }
+
+    // custom.size goes on the product's FIRST row only, listing every distinct
+    // size in vocabulary order. Omitted entirely if any size lacks a metaobject,
+    // rather than writing a dangling reference.
+    const ordered = [...sizes].sort((x, y) => SIZE_VOCABULARY.indexOf(x) - SIZE_VOCABULARY.indexOf(y));
+    const handles = ordered.map((sz) => SIZE_METAOBJECT[sz]).filter(Boolean);
+    if (memberRows.length && handles.length === ordered.length && ordered.length) {
+      memberRows[0][SIZE_METAFIELD_COL] = handles.join(", ");
+    }
+    memberRows[0] && (memberRows[0].__sizes = ordered.join(" | "));
+
+    if (existing) triage.addedVariants += memberRows.length;
+    else triage.newProducts++;
+    newRows.push(...memberRows);
+  }
 
   // --- deleted ------------------------------------------------------------
   const deletedRows = [];
@@ -751,19 +895,22 @@ variant-metafield columns, so most fields would have nothing to diff against.
     }
   }
 
-  // --- duplicate option combinations --------------------------------------
+  // --- duplicate Size within a product ------------------------------------
+  // Size is now the ONLY variant option, so it alone identifies a variant.
+  // Shopify rejects two variants sharing an option value. This must cover NEW
+  // products as well as variants added to existing ones -- an earlier version
+  // checked only the latter and missed AXPG-6-W39G2/G4, which both report UoM
+  // GALKIT and so both resolve to "1 Gallon Kit".
   const combos = new Map();
   for (const r of newRows) {
-    if (r.__handleSource !== "prefix-rule") continue;
-    const k = `${r[MATRIXIFY.handleCol]}||${r["Option1 Value"] || ""}/${r["Option2 Value"] || ""}`;
+    const k = `${r[MATRIXIFY.handleCol]}||${(r["Option1 Value"] || "").trim()}`;
     if (!combos.has(k)) combos.set(k, []);
     combos.get(k).push(r[MATRIXIFY.skuCol]);
   }
-  // Existing variants of those products occupy combinations too.
+  // Existing variants of a product occupy sizes too.
   for (const r of baseRows) {
-    const h = r[MATRIXIFY.handleCol];
-    const k = `${h}||${r["Option1 Value"] || ""}/${r["Option2 Value"] || ""}`;
-    if (combos.has(k)) combos.get(k).push(r[MATRIXIFY.skuCol] + " (existing)");
+    const k = `${r[MATRIXIFY.handleCol]}||${(r["Option1 Value"] || "").trim()}`;
+    if (combos.has(k)) combos.get(k).push(`${r[MATRIXIFY.skuCol]} (existing)`);
   }
   const dupCombos = [...combos.entries()].filter(([, v]) => v.length > 1);
 
@@ -777,15 +924,10 @@ variant-metafield columns, so most fields would have nothing to diff against.
       (changedOnly ? " [--changed-only]" : ` (mirrors the ${baseRows.length}-row baseline)`),
   );
   console.log(`  new-products     : ${newRows.length} rows`);
-  console.log(`      into existing products : ${newRows.length - triage.noHandle}`);
-  console.log(`      standalone drafts      : ${triage.noHandle}`);
-  console.log(`      awaiting a colour      : ${triage.noColor}`);
-  if (triage.handleNotInBaseline) {
-    console.log(
-      `      prefix rule matched but that product is not in the baseline: ${triage.handleNotInBaseline}` +
-        `\n      (emitted as standalone drafts -- is the baseline a full export?)`,
-    );
-  }
+  console.log(`      new products created   : ${triage.newProducts}`);
+  console.log(`      sizes added to existing: ${triage.addedVariants}`);
+  if (triage.noSize) console.log(`      UNRESOLVED size        : ${triage.noSize}  (blocks import)`);
+  if (triage.noColour) console.log(`      awaiting a colour      : ${triage.noColour}  (metafield only, does not block)`);
   if (defaultedSurcharges) {
     console.log(`      surcharge defaulted to ${SURCHARGE.defaultPercentForNewProducts}% : ${defaultedSurcharges}`);
   }
@@ -803,13 +945,35 @@ variant-metafield columns, so most fields would have nothing to diff against.
   }
 
   if (dupCombos.length) {
-    console.log(`\n  Duplicate option combinations -- Shopify rejects these:`);
+    console.log(`\n  DUPLICATE SIZE within a product -- Shopify rejects these:`);
     dupCombos.slice(0, 8).forEach(([k, v]) => {
       const [h, c] = k.split("||");
       console.log(`    ${h}`);
       console.log(`      "${c}" claimed by: ${v.join("  |  ")}`);
     });
+    console.log(`    Usually AccountMate's UoM is too coarse to tell two pack`);
+    console.log(`    sizes apart. Fix UOM_TO_SIZE / SKU_SUFFIX_SIZE_OVERRIDE, or`);
+    console.log(`    drop one row before importing.`);
   }
+
+  // Split out rows Shopify would reject, so new-products is directly
+  // importable. Nothing is dropped -- blocked rows go to their own file with
+  // the reason, and rejoin automatically once the underlying issue is fixed.
+  const blockedSkus = new Map();
+  for (const r of newRows) {
+    if ((r["Option1 Value"] || "") === "NEEDS-SIZE") {
+      blockedSkus.set(r[MATRIXIFY.skuCol], "size could not be resolved from AccountMate");
+    }
+  }
+  for (const [key, skus] of dupCombos) {
+    const [, size] = key.split("||");
+    // Keep the first claimant, block the rest -- they collide on Size.
+    skus.filter((x) => !x.endsWith("(existing)")).slice(1).forEach((sku) =>
+      blockedSkus.set(sku, `duplicate Size "${size}" within this product`),
+    );
+  }
+  const importableNewRows = newRows.filter((r) => !blockedSkus.has(r[MATRIXIFY.skuCol]));
+  const blockedNewRows = newRows.filter((r) => blockedSkus.has(r[MATRIXIFY.skuCol]));
 
   if (dryRun) {
     console.log("\n[dry run] nothing written.");
@@ -843,6 +1007,9 @@ variant-metafield columns, so most fields would have nothing to diff against.
     MATRIXIFY.variantCommandCol,
     MATRIXIFY.skuCol,
     ...MATRIXIFY_NEW_COLUMNS,
+    SIZE_METAFIELD_COL,
+    MIGRATION_COLOUR_PATTERN_COL,
+    MIGRATION_SAE_COL,
     MATRIXIFY.priceCol,
     MATRIXIFY.compareAtCol,
     MATRIXIFY.indicatorCol,
@@ -862,7 +1029,14 @@ variant-metafield columns, so most fields would have nothing to diff against.
     deletedRows,
   );
   writeCSV(path.join(outdir, `updated-products-${date}-${version}.csv`), updHeaders, strip(updatedRows, updHeaders));
-  writeCSV(path.join(outdir, `new-products-${date}-${version}.csv`), newHeaders, strip(newRows, newHeaders));
+  writeCSV(path.join(outdir, `new-products-${date}-${version}.csv`), newHeaders, strip(importableNewRows, newHeaders));
+  if (blockedNewRows.length) {
+    writeCSV(
+      path.join(outdir, `new-products-BLOCKED-${date}-${version}.csv`),
+      [...newHeaders, "__blockedBecause"],
+      blockedNewRows.map((r) => ({ ...r, __blockedBecause: blockedSkus.get(r[MATRIXIFY.skuCol]) })),
+    );
+  }
   writeCSV(
     path.join(outdir, `sync-report-${date}-${version}.csv`),
     ["File", "Variant SKU", "Handle", "Changed Fields", "Needs Review", "Handle Source"],
@@ -881,7 +1055,7 @@ variant-metafield columns, so most fields would have nothing to diff against.
         Handle: r[MATRIXIFY.handleCol],
         "Changed Fields": "",
         "Needs Review": r.__needsReview,
-        "Handle Source": r.__handleSource,
+        "Handle Source": r.__action,
       })),
     ],
   );
@@ -889,7 +1063,13 @@ variant-metafield columns, so most fields would have nothing to diff against.
 
   console.log(`\nWrote to ${outdir}/`);
   console.log(`  updated-products-${date}-${version}.csv  (${updatedRows.length} rows, Command: MERGE)`);
-  console.log(`  new-products-${date}-${version}.csv      (${newRows.length} rows)`);
+  console.log(`  new-products-${date}-${version}.csv      (${importableNewRows.length} rows, ready to import)`);
+  if (blockedNewRows.length) {
+    console.log(`  new-products-BLOCKED-${date}-${version}.csv  (${blockedNewRows.length} rows held back)`);
+    blockedNewRows.forEach((r) =>
+      console.log(`      ${r[MATRIXIFY.skuCol].padEnd(24)}${blockedSkus.get(r[MATRIXIFY.skuCol])}`),
+    );
+  }
   console.log(`  deleted-products-${date}-${version}.csv  (${deletedRows.length} rows)`);
   console.log(`  sync-report-${date}-${version}.csv`);
   console.log(`  ${COLOR_MAP_FILE}`);

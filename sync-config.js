@@ -194,17 +194,66 @@ export const PREFIX_TO_HANDLE = {
 // AccountMate's "Unit of Measure" attribute resolves 55/59 new SKUs, which beats
 // parsing SKU suffixes (33/59). SKU-suffix tokens are the fallback.
 export const UOM_TO_SIZE = {
-  GALKIT: "Gallon",
+  // AccountMate Unit of Measure is the primary size source, mapped onto the
+  // liquid_product_size enumeration. Derived from a UoM x SKU-suffix census of
+  // all 141 SKUs, not from the older catalog curation.
+  //
+  // The distinction the enumeration draws is can vs kit:
+  //   GAL / GGL.80        a plain gallon can            -> Gallon
+  //   1-GL KIT / GALKIT   base + catalyst kit, ~1 gal   -> 1 Gallon Kit
   GAL: "Gallon",
+  "GGL.80": "Gallon",
+  "1-GL KIT": "1 Gallon Kit",
+  GALKIT: "1 Gallon Kit",
+  "2-GL KIT": "2 Gallon Kit",
   QRTKT: "Quart",
   QRT: "Quart",
-  "1-GL KIT": "1 Gallon Kit",
-  "2-GL KIT": "2 Gallon Kit",
-  "4-GL KIT": "4 Gallon Kit",
-  "5-GL KIT": "5 Gallon Kit",
-  // Deliberately unmapped -- too ambiguous to guess. Falls through to SKU suffix:
-  //   EA, KIT
+  "2-OZ KIT": "2oz Kit",
+  // "4-GL KIT" is deliberately absent: there is no "4 Gallon Kit" in the
+  // enumeration. 1 SKU (AXPG-6-B487 G4) hits this and is reported, not guessed.
+  //
+  // "EA" and "KIT" are too coarse to map; both are resolved from the SKU suffix.
 };
+
+// SKU-suffix overrides, applied BEFORE the UoM map. Only tokens that
+// unambiguously name a size belong here. G1/G2/G4/_G/GL/KT/GK-1/GK-2 are
+// deliberately excluded -- the census shows each appearing under more than one
+// UoM, so they carry no reliable size of their own.
+export const SKU_SUFFIX_SIZE_OVERRIDE = {
+  "K-1/4 GL": "1.25 Gallon Kit",
+  "K-5GL": "5 Gallon Kit",
+  "KIT-2GL": "2 Gallon Kit",
+  "K-2GL": "2 Gallon Kit",
+  "2GLKT": "2 Gallon Kit",
+  "KIT-1GL": "1 Gallon Kit",
+  "2-OZ/KIT": "2oz Kit",
+  "2-OZ/KT": "2oz Kit",
+  "4OZ/K": "4oz Kit",
+  "6OZ/K": "6oz Kit",
+  "QT/KT": "Quart",
+  Q2: "Quart",
+  QT: "Quart",
+};
+
+// Longest-first, so "K-1/4 GL" wins over "GL".
+export const SKU_SUFFIX_OVERRIDE_ORDER = Object.keys(SKU_SUFFIX_SIZE_OVERRIDE).sort(
+  (a, b) => b.length - a.length,
+);
+
+// The complete Size vocabulary in use. Anything outside this set is a new
+// option value and needs a deliberate decision, so the migration flags it.
+export const SIZE_VOCABULARY = [
+  // Authoritative list from the liquid_product_size metaobject enumeration.
+  "Quart",
+  "Gallon",
+  "1 Gallon Kit",
+  "1.25 Gallon Kit",
+  "2 Gallon Kit",
+  "5 Gallon Kit",
+  "2oz Kit",
+  "4oz Kit",
+  "6oz Kit",
+];
 
 // Fallback: trailing token on the SKU -> Size. Mined from existing variants.
 export const SKU_SUFFIX_TO_SIZE = {
@@ -224,6 +273,10 @@ export const SKU_SUFFIX_TO_SIZE = {
   "2-OZ/KIT": "2oz Kit",
   "2-OZ/KT": "2oz Kit",
   "4OZ/K": "4oz Kit",
+  // Bare-gallon markers seen on legacy SKUs: "HZ17169KLE GL", "HZK2110GVP_2G".
+  // Per the mined UoM mapping every gallon-ish pack resolves to "Gallon".
+  GL: "Gallon",
+  "_2G": "Gallon",
   // NOTE: the live catalog maps 6OZ/K to BOTH "4oz Kit" and "6oz Touch-up Kit".
   // Picking the more literal reading; correct here if the catalog is wrong.
   "6OZ/K": "6oz Touch-up Kit",
@@ -241,9 +294,11 @@ export const SKU_SUFFIX_ORDER = [
   "6OZ/K",
   "GL/KT",
   "QT/KT",
+  "_2G",
   "GK-1",
   "GK-2",
   "_G",
+  "GL",
   "G1",
   "G2",
   "G4",
@@ -435,16 +490,14 @@ export const MATRIXIFY_FIELD_MAP = [
 
 // Extra columns needed when CREATING a variant or product (not for updates).
 export const MATRIXIFY_NEW_COLUMNS = [
+  "Option1 Name",
+  "Option1 Value",
   "Title",
   "Body HTML",
   "Vendor",
   "Type",
   "Status",
   "Published",
-  "Option1 Name",
-  "Option1 Value",
-  "Option2 Name",
-  "Option2 Value",
   "Variant Weight Unit",
   "Variant Taxable",
   "Variant Inventory Tracker",
@@ -452,3 +505,107 @@ export const MATRIXIFY_NEW_COLUMNS = [
   "Variant Fulfillment Service",
   "Variant Requires Shipping",
 ];
+
+// ===========================================================================
+// One-time migration (migrate-catalog.js)
+// ===========================================================================
+export const MIGRATION = {
+  // Products the migration must not touch.
+  excludeHandles: ["test"],
+
+  colourPatternCol: "Metafield: shopify.color-pattern [list.metaobject_reference]",
+  saeColourCol: "Metafield: custom.sae_color [single_line_text_field]",
+  colourNamespace: "shopify--color-pattern",
+
+  // Consolidated products store colour as a display name ("17875 (White Gloss)").
+  // The leading code slugifies to the metaobject handle for 36 of 39 values;
+  // these three have no leading code and are named explicitly. All three handles
+  // already exist in the catalog.
+  colourHandleOverrides: {
+    "Clear Flat": "clear-flat",
+    "Clear Semi-Gloss": "clear-semigloss",
+    "Dark Green (Colombia Police)": "dark-green-colombia-police",
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Size -> size metaobject handle
+// ---------------------------------------------------------------------------
+// `custom.size [list.metaobject_reference]` is the product-level category
+// metafield the Size variant option is linked to. It holds the product's
+// DISTINCT sizes (the `test` product has 12 variants but only 4 sizes -> 4
+// handles), comma-space separated.
+//
+// Only the first four handles are confirmed against the export. The rest follow
+// the observed slug convention (lowercase, non-alphanumeric -> dash, a dash
+// inserted between a leading digit and "oz") but have NOT been seen in the
+// store. Using one that does not exist creates a dangling reference, so the
+// migration refuses to emit them and reports instead.
+export const SIZE_METAOBJECT = {
+  // Authoritative handles supplied from the Shopify metaobject list. All
+  // confirmed -- no guessed slugs remain.
+  Quart: "liquid_product_size.quart",
+  Gallon: "liquid_product_size.gallon",
+  "1 Gallon Kit": "liquid_product_size.1-gallon-kit",
+  "1.25 Gallon Kit": "liquid_product_size.1-25-gallon-kit",
+  "2 Gallon Kit": "liquid_product_size.2-gallon-kit",
+  "5 Gallon Kit": "liquid_product_size.5-gallon-kit",
+  "2oz Kit": "liquid_product_size.2-oz-kit",
+  "4oz Kit": "liquid_product_size.4-oz-kit",
+  "6oz Kit": "liquid_product_size.6-oz-kit",
+};
+
+// Display values in the catalog that are NOT in the enumeration and must be
+// renamed to match it. Applied wherever a size is resolved.
+export const SIZE_RENAMES = {
+  "1 1/4 Gallon Kit": "1.25 Gallon Kit",
+  "6oz Touch-up Kit": "6oz Kit",
+};
+
+export const SIZE_METAFIELD_COL = "Metafield: custom.size [list.metaobject_reference]";
+
+// ---------------------------------------------------------------------------
+// New-product handles
+// ---------------------------------------------------------------------------
+// Scheme: hentzen-{mpn}-{spec}, matching the dominant existing pattern
+// (hentzen-31104kpx-t1-mil-prf-85285f-type-i). Applied to NEW products only --
+// existing handles are never renamed, because that would drop their SEO ranking.
+export const NEW_PRODUCT_HANDLE = {
+  prefix: "hentzen",
+
+  // The AX prefix means two different things:
+  //   AX + DIGIT  ("AX10", "AX17", "AX1440-SW")  a real Hentzen product name,
+  //                                               normalised to "AX-10" etc.
+  //   AX + LETTER ("AXEP-3", "AXPG-6", "AXTS-1")  a client data-entry error,
+  //                                               stripped.
+  normalizeMpn(v) {
+    let raw = String(v || "").replace(/\s*\+.*$/, "").trim();
+
+    // "HZ" / "HZK" is the client's internal SKU prefix, never part of the
+    // manufacturer part number. Existing titles read "Hentzen 22167WEP", not
+    // "Hentzen HZK22167WEP".
+    raw = raw.replace(/^HZK?/i, "");
+
+    // A trailing bare G or Q directly after a digit is a size marker glued to
+    // the code ("WF-3-BK1G" = BK1 + Gallon, "TS-1-G1Q" = G1 + Quart). A colour
+    // code like "PG-6-G1" ends in letter+digit and is left alone.
+    raw = raw.replace(/(\d)[GQ]$/i, "$1");
+
+    if (/^AX\d/i.test(raw)) return raw.replace(/^AX-?/i, "AX-");
+    return raw.replace(/^AX/i, "");
+  },
+
+  // Only well-formed specs are used. Matching loosely against the short
+  // description produced garbage like "BMS 1011VTY"; when nothing matches the
+  // handle is just hentzen-{mpn}, which is still a valid, searchable URL.
+  specPattern:
+    /\b(MIL-(?:PRF|DTL|C|P|A)-\d{4,5}[A-Z]?|BMS\s*10-\d{2}|AMS\s*\d{4}|BAMS\s*\d{3}-\d{3}|DOD-P-\d{4,5}|DMS\s*\d{4})/i,
+
+  specFrom(amRow) {
+    const txt = String(amRow["Short description"] || "").replace(/\\n/g, " ");
+    const m = txt.match(this.specPattern);
+    // Normalise spacing before slugging: the source writes both "BMS 10-83" and
+    // "BMS10-83".
+    return m ? m[1].replace(/^([A-Z]+)(\d)/i, "$1 $2").replace(/\s+/g, "-") : "";
+  },
+};

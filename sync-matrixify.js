@@ -48,6 +48,11 @@ import {
   MATRIXIFY,
   MATRIXIFY_FIELD_MAP,
   MATRIXIFY_NEW_COLUMNS,
+  PRODUCT_CATEGORY,
+  CATEGORY_COLUMNS,
+  classifyCategory,
+  PRODUCT_TYPE,
+  milSpecTag,
 } from "./sync-config.js";
 
 // ===========================================================================
@@ -177,6 +182,22 @@ function valuesDiffer(a, b, compare, tolerance = 0.01) {
   return String(a).trim() !== String(b ?? "").trim();
 }
 
+/** Semicolon-delimited input -> JSON array, one element per value. */
+function jsonList(v) {
+  const parts = String(v || "").split(";").map((x) => x.trim()).filter(Boolean);
+  return parts.length ? JSON.stringify(parts) : "";
+}
+
+/**
+ * compliance_certifications is a list metafield holding ONE element whose text
+ * is semicolon-delimited -- ["a; b; c"], not ["a","b","c"]. That is the shape
+ * the catalog already uses and what the storefront expects.
+ */
+function jsonBlob(v) {
+  const parts = String(v || "").split(";").map((x) => x.trim()).filter(Boolean);
+  return parts.length ? JSON.stringify([parts.join("; ")]) : "";
+}
+
 function computePricing(amRow, { allowDefaultSurcharge = false } = {}) {
   const base = parseFloat(amRow[SURCHARGE.basePriceCol]);
   let surcharge = parseFloat(getAttr(amRow, SURCHARGE.amountAttr)) || 0;
@@ -249,6 +270,14 @@ function loadContentMap(file) {
       handle: pickField(r, "Handle"),
       title: pickField(r, "Title"),
       body: pickField(r, "Body HTML"),
+      description: (r.Description || "").trim(),
+      spec: (r.Spec || "").trim(),
+      milSpecs: pickField(r, "Mil Specs"),
+      qpl: pickField(r, "QPL"),
+      compliance: pickField(r, "Compliance"),
+      applications: pickField(r, "Applications"),
+      parentCollection: (r["Parent Collection"] || "").trim(),
+      nsn: (r.NSN || "").trim(),
     });
   }
   return m;
@@ -312,6 +341,7 @@ const MIGRATION_SAE_COL = "Metafield: custom.sae_color [single_line_text_field]"
 
 const PRODUCT_LEVEL_CARRY = [
   "Title",
+  "Tags",
   "Body HTML",
   "Vendor",
   "Type",
@@ -323,6 +353,13 @@ const PRODUCT_LEVEL_CARRY = [
   MIGRATION_COLOUR_PATTERN_COL,
   MIGRATION_SAE_COL,
   SIZE_METAFIELD_COL,
+  ...CATEGORY_COLUMNS,
+  "Metafield: custom.mil_specs [list.metaobject_reference]",
+  "Metafield: custom.qpl [list.metaobject_reference]",
+  "Metafield: custom.compliance_certifications [list.single_line_text_field]",
+  "Metafield: custom.applications [list.single_line_text_field]",
+  "Metafield: custom.parent_collection [collection_reference]",
+  "Metafield: custom.nsn [single_line_text_field]",
 ];
 
 // --- grouping --------------------------------------------------------------
@@ -820,6 +857,45 @@ variant-metafield columns, so most fields would have nothing to diff against.
         row["Variant Inventory Policy"] = "deny";
         row["Variant Fulfillment Service"] = "manual";
         row["Variant Requires Shipping"] = "true";
+        // Category is REQUIRED: custom.size is a category metafield and is
+        // rejected outright on a product with no category.
+        const kind = classifyCategory(groupContent?.description, groupContent?.spec);
+        Object.assign(row, PRODUCT_CATEGORY[kind]);
+        row["Type"] = PRODUCT_TYPE[kind];
+
+        // Tags: "hazmat" when the product is hazardous, plus the base form of
+        // each mil spec it is qualified for ("mil-prf-85285").
+        const specTags = (groupContent?.milSpecs || "")
+          .split(",").map((x) => x.trim()).filter(Boolean).map(milSpecTag);
+        const isHazmat = /^yes$/i.test(getAttr(amRow, "Hazardous"));
+        const tags = [...new Set([isHazmat ? "hazmat" : "", ...specTags].filter(Boolean))];
+        if (tags.length) {
+          row["Tags"] = tags.join(", ");
+          row["Tags Command"] = "REPLACE";
+        }
+
+        // Authored / derived product metafields. Written only when non-empty --
+        // a blank cell would clear the field, and these columns are shared with
+        // add-variant rows.
+        const meta = {
+          "Metafield: custom.mil_specs [list.metaobject_reference]": (groupContent?.milSpecs || "")
+            .split(",").map((x) => x.trim()).filter(Boolean)
+            .map((h) => (h.startsWith("military_specification.") ? h : `military_specification.${h}`))
+            .join(", "),
+          "Metafield: custom.qpl [list.metaobject_reference]": (groupContent?.qpl || "")
+            .split(",").map((x) => x.trim()).filter(Boolean)
+            .map((h) => (h.startsWith("military_specification.") ? h : `military_specification.${h}`))
+            .join(", "),
+          // list.single_line_text_field is stored as a JSON array, one element
+          // per value -- NOT a semicolon-delimited blob. (The existing catalog
+          // has several of these as a single element containing semicolons;
+          // that is the shape being corrected here.)
+          "Metafield: custom.compliance_certifications [list.single_line_text_field]": jsonBlob(groupContent?.compliance),
+          "Metafield: custom.applications [list.single_line_text_field]": jsonList(groupContent?.applications),
+          "Metafield: custom.parent_collection [collection_reference]": groupContent?.parentCollection || "",
+          "Metafield: custom.nsn [single_line_text_field]": groupContent?.nsn || "",
+        };
+        for (const [k, v] of Object.entries(meta)) if (v) row[k] = v;
         // Colour is a METAFIELD now, not a variant option, so an unconfirmed
         // colour no longer blocks the import -- it just leaves the field unset.
         if (colour) {
@@ -1007,6 +1083,17 @@ variant-metafield columns, so most fields would have nothing to diff against.
     MATRIXIFY.variantCommandCol,
     MATRIXIFY.skuCol,
     ...MATRIXIFY_NEW_COLUMNS,
+    // Required: custom.size is a category metafield and is rejected on a
+    // product with no category.
+    ...CATEGORY_COLUMNS,
+    "Metafield: custom.mil_specs [list.metaobject_reference]",
+    "Metafield: custom.qpl [list.metaobject_reference]",
+    "Metafield: custom.compliance_certifications [list.single_line_text_field]",
+    "Metafield: custom.applications [list.single_line_text_field]",
+    "Metafield: custom.parent_collection [collection_reference]",
+    "Metafield: custom.nsn [single_line_text_field]",
+    "Tags",
+    "Tags Command",
     SIZE_METAFIELD_COL,
     MIGRATION_COLOUR_PATTERN_COL,
     MIGRATION_SAE_COL,

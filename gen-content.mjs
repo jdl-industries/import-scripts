@@ -18,7 +18,14 @@
 
 import fs from "fs";
 import { parse } from "csv-parse/sync";
-import { NEW_PRODUCT_HANDLE } from "./sync-config.js";
+import {
+  NEW_PRODUCT_HANDLE,
+  MIL_SPEC_PATTERNS,
+  MIL_SPEC_UNMAPPABLE,
+  PARENT_COLLECTION,
+  APPLICATION_ATTRS,
+  classifyCategory,
+} from "./sync-config.js";
 
 // --- terse description + spec, per MPN (confirmed by the user) --------------
 const T = {
@@ -217,6 +224,51 @@ function colourPhrase(amRow) {
   return m[1].trim().replace(/\s+/g, " ");
 }
 
+/**
+ * Decode the entities AccountMate leaves in its description HTML.
+ *
+ * Applied REPEATEDLY until stable: the long Description field is double-encoded
+ * ("&amp;amp;") while Short description is single ("&amp;"). One pass leaves
+ * "&amp;" behind, whose embedded semicolon then splits a qualification in half
+ * -- "CLASS A&amp;B, GRADE D" became two entries, "CLASS A&amp" and "B, GRADE D".
+ */
+function decode(t) {
+  let out = String(t || "").replace(/\\n/g, "\n");
+  let prev;
+  do {
+    prev = out;
+    out = out.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+  } while (out !== prev);
+  return out;
+}
+
+/** Pull one labelled block ("QPL", "Meets the requirements of") from a description. */
+function specBlock(amRow, label) {
+  const d = decode(amRow?.Description) + "\n" + decode(amRow?.["Short description"]);
+  const m = d.match(new RegExp(label + ":<\\/i><\\/strong>\\s*([^\\n<]+)", "i"));
+  return m ? m[1].trim() : "";
+}
+
+/** Split a spec block into individual qualifications. */
+const splitSpecs = (block) =>
+  block.split(";").map((x) => x.trim()).filter((x) => x && x.length > 2 && !/^amp$/i.test(x));
+
+const unmappedSpecs = new Map();
+
+/**
+ * Resolve one spec string to a metaobject handle, or null. Records anything
+ * MIL-shaped that cannot be resolved, so it is reported rather than lost.
+ */
+function milHandle(spec, sku) {
+  for (const [re, handle] of MIL_SPEC_PATTERNS) if (re.test(spec)) return handle;
+  if (/\bMIL-/i.test(spec)) {
+    const why = MIL_SPEC_UNMAPPABLE.some((re) => re.test(spec)) ? "no matching metaobject" : "type/class not resolvable";
+    if (!unmappedSpecs.has(spec)) unmappedSpecs.set(spec, { why, skus: [] });
+    unmappedSpecs.get(spec).skus.push(sku);
+  }
+  return null;
+}
+
 const rows = [];
 const seen = new Set();
 const missing = [];
@@ -252,6 +304,23 @@ for (const r of np) {
   }
   const body = bodyParts.join("\n");
 
+  // --- specifications ------------------------------------------------------
+  const qplBlock = specBlock(amRow, "QPL");
+  const meetsBlock = specBlock(amRow, "Meets the requirements of");
+  const qplSpecs = splitSpecs(qplBlock);
+  const allSpecs = [...qplSpecs, ...splitSpecs(meetsBlock)];
+
+  // custom.qpl: only specs named in the QPL block -- that block is the
+  // certification claim; "Meets the requirements of" is not the same thing.
+  const qplHandles = [...new Set(qplSpecs.map((x) => milHandle(x, r["Variant SKU"])).filter(Boolean))];
+  // custom.mil_specs: every MIL spec the product is qualified for, from either block.
+  const milHandles = [...new Set(allSpecs.map((x) => milHandle(x, r["Variant SKU"])).filter(Boolean))];
+  // compliance_certifications: everything that is NOT a MIL spec, deduped.
+  const compliance = [...new Set(allSpecs.filter((x) => !/\bMIL-/i.test(x)))];
+
+  const category = classifyCategory(desc, spec);
+  const applications = APPLICATION_ATTRS.filter((n) => /^yes$/i.test(attr(amRow || {}, n)));
+
   rows.push({
     SKU: r["Variant SKU"],
     "Confirmed Handle": "",
@@ -260,6 +329,16 @@ for (const r of np) {
     "Drafted Title": title,
     "Confirmed Body HTML": "",
     "Drafted Body HTML": body,
+    "Confirmed Mil Specs": "",
+    "Drafted Mil Specs": milHandles.join(", "),
+    "Confirmed QPL": "",
+    "Drafted QPL": qplHandles.join(", "),
+    "Confirmed Compliance": "",
+    "Drafted Compliance": compliance.join("; "),
+    "Confirmed Applications": "",
+    "Drafted Applications": applications.join("; "),
+    "Parent Collection": PARENT_COLLECTION[category],
+    NSN: "",
     MPN: mpn,
     Description: desc,
     Spec: spec,
@@ -267,7 +346,19 @@ for (const r of np) {
   });
 }
 
-const H = ["SKU", "Confirmed Handle", "Drafted Handle", "Confirmed Title", "Drafted Title", "Confirmed Body HTML", "Drafted Body HTML", "MPN", "Description", "Spec", "Family"];
+const H = [
+  "SKU",
+  "Confirmed Handle", "Drafted Handle",
+  "Confirmed Title", "Drafted Title",
+  "Confirmed Body HTML", "Drafted Body HTML",
+  "Confirmed Mil Specs", "Drafted Mil Specs",
+  "Confirmed QPL", "Drafted QPL",
+  "Confirmed Compliance", "Drafted Compliance",
+  "Confirmed Applications", "Drafted Applications",
+  "Parent Collection",
+  "NSN",
+  "MPN", "Description", "Spec", "Family",
+];
 const esc = (v) => (/[",\n\r]/.test(String(v ?? "")) ? `"${String(v).replace(/"/g, '""')}"` : String(v ?? ""));
 fs.writeFileSync("new-product-content.csv", [H.join(","), ...rows.map((r) => H.map((h) => esc(r[h])).join(","))].join("\n") + "\n");
 
@@ -279,4 +370,16 @@ Object.entries(byFam).sort((a, b) => b[1] - a[1]).forEach(([k, v]) => console.lo
 const uniqueLeads = new Set(rows.map((r) => r["Drafted Body HTML"].split("\n")[0]));
 console.log(`\nunique opening paragraphs: ${uniqueLeads.size} of ${rows.length}`);
 console.log(`avg description length: ${Math.round(rows.reduce((a, r) => a + r["Drafted Body HTML"].length, 0) / rows.length)} chars`);
+const n = (f) => rows.filter((r) => (r[f] || "").trim()).length;
+console.log(`\nfields populated: mil_specs ${n("Drafted Mil Specs")}, qpl ${n("Drafted QPL")}, ` +
+  `compliance ${n("Drafted Compliance")}, applications ${n("Drafted Applications")}, ` +
+  `parent_collection ${n("Parent Collection")}, nsn ${n("NSN")}`);
+if (unmappedSpecs.size) {
+  console.log(`\nMIL specs found but NOT mapped to a metaobject (${unmappedSpecs.size}):`);
+  for (const [spec, info] of unmappedSpecs) {
+    console.log(`  ${JSON.stringify(spec)}`);
+    console.log(`     ${info.why} -- affects ${info.skus.length} SKU(s)`);
+  }
+  console.log(`  These are left out of custom.mil_specs rather than guessed.`);
+}
 console.log("\nWrote new-product-content.csv");

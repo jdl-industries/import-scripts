@@ -609,3 +609,108 @@ export const NEW_PRODUCT_HANDLE = {
     return m ? m[1].replace(/^([A-Z]+)(\d)/i, "$1 $2").replace(/\s+/g, "-") : "";
   },
 };
+
+// ---------------------------------------------------------------------------
+// Product category
+// ---------------------------------------------------------------------------
+// Shopify's category metafields (custom.size among them) are constrained to the
+// product's category. A product created without one rejects the metafield with
+// "Owner subtype does not match the metafield definition's constraints", so the
+// category MUST be set on every new product.
+export const PRODUCT_CATEGORY = {
+  primer: {
+    "Category: ID": "ha-1-6-3",
+    "Category: Name": "Primers",
+    Category: "Hardware > Building Consumables > Painting Consumables > Primers",
+  },
+  topcoat: {
+    "Category: ID": "ha-1-6-1",
+    "Category: Name": "Paint",
+    Category: "Hardware > Building Consumables > Painting Consumables > Paint",
+  },
+  carc: {
+    "Category: ID": "ha-1-8-2",
+    "Category: Name": "Protective Coatings",
+    Category: "Hardware > Building Consumables > Protective Coatings & Sealants > Protective Coatings",
+  },
+};
+
+export const CATEGORY_COLUMNS = ["Category: ID", "Category: Name", "Category"];
+
+/**
+ * Classify a product from its description and spec. CARC is checked first
+ * because a CARC coating is also a topcoat; primer next; everything else is
+ * Paint -- including accelerators, reducers and non-skid walkway coatings,
+ * which have no better home in the three categories in use.
+ */
+export function classifyCategory(description, spec) {
+  const t = `${description || ""} ${spec || ""}`.toLowerCase();
+  if (/\bcarc\b|53039/.test(t)) return "carc";
+  if (/primer/.test(t)) return "primer";
+  return "topcoat";
+}
+
+// ---------------------------------------------------------------------------
+// Specifications
+// ---------------------------------------------------------------------------
+// The 17 mil-spec metaobjects that exist. A product may only reference these.
+export const MIL_SPEC_HANDLES = [
+  "mil-dtl-53022-type-iv-class-l", "mil-dtl-53030-type-ii", "mil-dtl-53022-type-iv-class-u",
+  "mil-c-8514", "mil-prf-22750-type-ii-class-h-grade-a", "mil-prf-23377-type-ii-class-c2",
+  "mil-prf-23377-type-i-class-c2", "mil-prf-23377-type-i-class-c1", "mil-prf-23377-type-ii-class-n",
+  "mil-prf-85285-type-iv-class-h", "mil-prf-85285-type-i-class-h", "mil-prf-85285-type-ii-class-h",
+  "mil-prf-81352-type-i", "mil-prf-85582-type-ii-class-c2", "mil-prf-85582-type-i-class-c2",
+  "mil-dtl-53039-type-ix", "mil-dtl-53039-type-iv",
+];
+
+// AccountMate spec strings -> metaobject handle.
+//
+// Deliberately CONSERVATIVE. A mil-spec reference on an aerospace coating is a
+// compliance claim, so a string is mapped only where the spec, type and class
+// are all unambiguous. Anything else is reported for a human decision rather
+// than guessed -- see UNMAPPABLE below for the cases this currently refuses.
+export const MIL_SPEC_PATTERNS = [
+  [/MIL-PRF-85285.*\bTY(?:PE)?\s*(?:I\b|1\b)(?!I|V).*CL(?:ASS)?\s*H/i, "mil-prf-85285-type-i-class-h"],
+  [/MIL-PRF-85285.*\bTY(?:PE)?\s*(?:II|2)\b(?!I).*CL(?:ASS)?\s*H/i, "mil-prf-85285-type-ii-class-h"],
+  [/MIL-PRF-85285.*\bTY(?:PE)?\s*(?:IV|4)\b/i, "mil-prf-85285-type-iv-class-h"],
+  [/MIL-PRF-85285,?\s*TYPE\s*I,\s*CLASS\s*H/i, "mil-prf-85285-type-i-class-h"],
+  [/MIL-DTL-53022.*\bTY(?:PE)?\s*IV.*\bCL(?:S|ASS)?\s*U/i, "mil-dtl-53022-type-iv-class-u"],
+  [/MIL-DTL-53022.*\bTY(?:PE)?\s*IV.*\bCL(?:S|ASS)?\s*L/i, "mil-dtl-53022-type-iv-class-l"],
+  [/MIL-DTL-53030.*\bTY(?:PE)?\s*II\b/i, "mil-dtl-53030-type-ii"],
+  [/MIL-DTL-53039.*\bTY(?:PE)?\s*IX\b/i, "mil-dtl-53039-type-ix"],
+  [/MIL-DTL-53039.*\bTY(?:PE)?\s*IV\b/i, "mil-dtl-53039-type-iv"],
+  [/MIL-C-8514\b/i, "mil-c-8514"],
+  [/MIL-PRF-81352.*\bTY(?:PE)?\s*I\b(?!I|V)/i, "mil-prf-81352-type-i"],
+  [/MIL-PRF-23377.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*C2/i, "mil-prf-23377-type-ii-class-c2"],
+  [/MIL-PRF-23377.*\bTY(?:PE)?\s*I\b(?!I|V).*\bCL(?:ASS)?\s*C2/i, "mil-prf-23377-type-i-class-c2"],
+  [/MIL-PRF-23377.*\bTY(?:PE)?\s*I\b(?!I|V).*\bCL(?:ASS)?\s*C1/i, "mil-prf-23377-type-i-class-c1"],
+  [/MIL-PRF-23377.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*N/i, "mil-prf-23377-type-ii-class-n"],
+  [/MIL-PRF-85582.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*C-?2/i, "mil-prf-85582-type-ii-class-c2"],
+  [/MIL-PRF-85582.*\bTY(?:PE)?\s*I\b(?!I|V).*\bCL(?:ASS)?\s*C-?2/i, "mil-prf-85582-type-i-class-c2"],
+  [/MIL-PRF-22750.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*H/i, "mil-prf-22750-type-ii-class-h-grade-a"],
+];
+
+// Strings that name a MIL spec but cannot be resolved to one of the 17 handles.
+// Listed explicitly so they are reported rather than silently dropped:
+//   MIL-C-85285          superseded designation, no type/class given
+//   MIL-C-83286          no metaobject exists
+//   MIL-PRF-22750        no type/class given; "TYPE I" has no metaobject
+export const MIL_SPEC_UNMAPPABLE = [/MIL-C-85285/i, /MIL-C-83286/i, /MIL-PRF-22750(?!.*TY)/i];
+
+export const PARENT_COLLECTION = {
+  primer: "aviation-primers",
+  topcoat: "aviation-topcoats",
+  carc: "chemical-agent-resistive-coatings-carc",
+};
+
+export const APPLICATION_ATTRS = ["Aviation", "Marine", "Industrial"];
+
+// Shopify "Type", per category. Title-case, matching the 3 values in use.
+export const PRODUCT_TYPE = { primer: "Primer", topcoat: "Topcoat", carc: "CARC" };
+
+/**
+ * Tag form of a mil-spec handle: the base spec without type/class, which is how
+ * the catalog tags them ("mil-prf-85285", not the full handle).
+ */
+export const milSpecTag = (handle) =>
+  String(handle).replace(/^military_specification\./, "").replace(/-type-.*$/, "");

@@ -1111,8 +1111,10 @@ variant-metafield columns, so most fields would have nothing to diff against.
         archivedSkipped++;
         continue;
       }
-      // Retired in place as a variant above -- the product is still selling.
-      if (handleHasLiveVariant.has(r[MATRIXIFY.handleCol])) continue;
+      // Retired in place as a variant above. Still listed here so this file is a
+      // complete record of everything AccountMate has dropped -- the Reason
+      // column distinguishes it from a product with nothing left to sell.
+      const retiredInPlace = handleHasLiveVariant.has(r[MATRIXIFY.handleCol]);
       deletedRows.push({
         "Variant SKU": r[MATRIXIFY.skuCol],
         Handle: r[MATRIXIFY.handleCol],
@@ -1120,8 +1122,12 @@ variant-metafield columns, so most fields would have nothing to diff against.
         Status: r["Status"] || "",
         "Variant Price": r[MATRIXIFY.priceCol] || "",
         "Variant Inventory Qty": r["Variant Inventory Qty"] || "",
-        Reason: "Not present in AccountMate export",
-        "Suggested Action": "Mark inactive",
+        Reason: retiredInPlace
+          ? "Retired in place -- variant discontinued, product still sells other sizes"
+          : "Not present in AccountMate export",
+        "Suggested Action": retiredInPlace
+          ? "No action needed -- updated-products sets inventory 0 and policy deny"
+          : "Mark inactive",
       });
     }
   }
@@ -1147,9 +1153,11 @@ variant-metafield columns, so most fields would have nothing to diff against.
 
   // --- report -------------------------------------------------------------
   console.log("--- Summary ---");
+  const retiredListed = deletedRows.filter((r) => r.Reason.startsWith("Retired in place")).length;
   console.log(
     `  deleted-products : ${deletedRows.length} rows` +
-      (archivedSkipped ? `  (${archivedSkipped} already-archived row(s) skipped)` : ""),
+      (retiredListed ? `  (${retiredListed} retired in place, ${deletedRows.length - retiredListed} to retire)` : "") +
+      (archivedSkipped ? `  [${archivedSkipped} archived skipped]` : ""),
   );
   const changedRowCount = updatedRows.filter((r) => r.__changed).length;
   console.log(

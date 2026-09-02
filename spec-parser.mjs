@@ -34,7 +34,7 @@ export const GOVERNING_BODY = [
   ["LMCO", "Lockheed Martin"],
   ["LOCKHEED", "Lockheed Martin"],
   ["SAAB", "Saab"],
-  ["OSU", "Ohio State University"],
+  ["OSU", "FAA"],
   ["HMS", "Honeywell"],
 ].sort((a, b) => b[0].length - a[0].length);
 
@@ -54,7 +54,23 @@ const ABBREV = [
  * "BMS10-83" can be repaired. Deliberately a fixed list: a blanket
  * letters-then-digits rule split "GP110AEE" into "GP 110AEE".
  */
-const SPACED_PREFIXES = ["BAMS", "CMAMS", "CMS", "DHMS", "DPM", "DMS", "BMS", "MEP", "AIMS", "AMS", "HMS", "EPS", "SAAB", "OSU", "FAR"];
+const SPACED_PREFIXES = [
+  "BAMS",
+  "CMAMS",
+  "CMS",
+  "DHMS",
+  "DPM",
+  "DMS",
+  "BMS",
+  "MEP",
+  "AIMS",
+  "AMS",
+  "HMS",
+  "EPS",
+  "SAAB",
+  "OSU",
+  "FAR",
+];
 
 /** Acronyms that stay uppercase even in the qualifier tail. */
 const KEEP_UPPER = new Set(["PQS", "EMAP", "OSU", "FAR", "BURN"]);
@@ -81,7 +97,10 @@ export function normalizeSpec(raw) {
     // A hyphen standing in for a space before a qualifier: MIL-PRF-85285-TYPE I
     .replace(/-(TYPE|TY|CLASS|CLS|CL|GRADE|GR|COMP|REV|FORM)\b/gi, " $1")
     // Missing space between a known prefix and its number: BMS10-83.
-    .replace(new RegExp(`\\b(${SPACED_PREFIXES.join("|")})(\\d)`, "gi"), "$1 $2")
+    .replace(
+      new RegExp(`\\b(${SPACED_PREFIXES.join("|")})(\\d)`, "gi"),
+      "$1 $2",
+    )
     // Missing space after a qualifier word: TYPEI -> TYPE I
     .replace(/\b(TYPE|TY|CLASS|CLS|CL|GRADE|GR)([IVX0-9])/gi, "$1 $2")
     // "REV.A" -> "REV. A" so REV is recognised as a qualifier.
@@ -144,7 +163,9 @@ export function specTitle(raw) {
     else groups[groups.length - 1].push(w.replace(/,$/, ""));
   }
   const tailText = groups.map((g) => g.join(" ")).join(", ");
-  return `${head.replace(/,$/, "").trim()} ${tailText}`.replace(/\s+/g, " ").trim();
+  return `${head.replace(/,$/, "").trim()} ${tailText}`
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /**
@@ -161,7 +182,9 @@ function baseSpecRoot(raw) {
   let firstQualifier = words.findIndex((w) =>
     QUALIFIERS.includes(w.replace(/[^A-Z]/gi, "").toUpperCase()),
   );
-  let head = (firstQualifier === -1 ? s : words.slice(0, firstQualifier).join(" ")).trim();
+  let head = (
+    firstQualifier === -1 ? s : words.slice(0, firstQualifier).join(" ")
+  ).trim();
   head = head.replace(/,$/, "").trim();
   // Trailing prose after the identifier is not part of the base:
   // "FAR 25.853 VERTICAL BURN" -> "FAR 25.853".
@@ -214,7 +237,10 @@ export function expandSpec(raw) {
   const [full, kw, a, b] = m;
   const out = [];
   for (const v of [a, b]) {
-    const replaced = title.slice(0, m.index) + `${kw} ${v}` + title.slice(m.index + full.length);
+    const replaced =
+      title.slice(0, m.index) +
+      `${kw} ${v}` +
+      title.slice(m.index + full.length);
     out.push(...expandSpec(replaced));
   }
   return [...new Set(out)];
@@ -252,11 +278,16 @@ const LABELS = {
  * Pull both specification lists from an AccountMate row.
  * Returns { approved: [titles], meets: [titles] }, deduped and normalised.
  */
-export function extractSpecs(amRow, fields = ["Short description", "Description"]) {
+export function extractSpecs(
+  amRow,
+  fields = ["Short description", "Description"],
+) {
   const text = fields.map((f) => decodeDesc(amRow?.[f])).join("\n");
   const out = {};
   for (const [key, label] of Object.entries(LABELS)) {
-    const m = text.match(new RegExp(`${label}:</i></strong>\\s*([^\\n<]+)`, "i"));
+    const m = text.match(
+      new RegExp(`${label}:</i></strong>\\s*([^\\n<]+)`, "i"),
+    );
     const list = m
       ? m[1]
           .split(";")

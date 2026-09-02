@@ -29,6 +29,9 @@ export const ATTRIBUTE_SLOTS = 19;
 // `blankPolicy`:
 //   "skip"      - a blank/zero AccountMate value never overwrites Shopify (default)
 //   "overwrite" - blank AccountMate values are written through
+// `newProductsOnly`:
+//   true        - written when a product is created, never on updates, and the
+//                 column is omitted from updated-products so it cannot be cleared
 //
 // NOTE: "Variant Price" is deliberately absent. Shopify's price is base price
 // PLUS surcharge, so it is computed in one place (see SURCHARGE) rather than
@@ -132,6 +135,7 @@ export const UPDATABLE_COLUMNS = [
 // Variant Price is computed.
 export const SURCHARGE = {
   amountAttr: "Surcharge amount",
+  percentAttr: "Surcharge percent",
   basePriceCol: "Regular price",
   priceCol: "Variant Price",
   compareAtCol: "Variant Compare At Price",
@@ -387,6 +391,32 @@ export const MATRIXIFY = {
  * The parallel `custom.*_in [number_decimal]` metafields are unpopulated
  * (0/14 rows) and are treated as abandoned.
  */
+/**
+ * Decode AccountMate description text.
+ *
+ * NOT currently applied to the accountmate_description / _short_description
+ * metafields: those mirror the source verbatim by request. Kept because two
+ * quirks of the source will show through as a result --
+ *   * the long Description field is DOUBLE-encoded ("&amp;amp;") while Short
+ *     description is single ("&amp;")
+ *   * both carry literal "\n" escape sequences rather than real newlines
+ * Wire this in as a transform if either should be cleaned up.
+ */
+export function decodeAccountMateText(v) {
+  let out = String(v || "").replace(/\\n/g, "\n");
+  let prev;
+  do {
+    prev = out;
+    out = out
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">");
+  } while (out !== prev);
+  return out.replace(/\s*\n+\s*/g, " ").replace(/\s{2,}/g, " ").trim();
+}
+
 const dimension = (v) => {
   const n = parseFloat(v);
   return Number.isFinite(n) && n > 0
@@ -423,11 +453,20 @@ export const MATRIXIFY_FIELD_MAP = [
     // is no ambiguity. Both custom.* copies are left untouched.
     col: "Variant Metafield: mm-google-shopping.mpn [single_line_text_field]",
     compare: "string",
+    // Set once when the product is created, then owned by hand. AccountMate's
+    // Vendor SKU is too unreliable to sync on an ongoing basis -- it carries
+    // values like "PAINT" and "JDL-12", and lists AXTF-1-BR1 as AXTS-1-BR1.
+    // Excluded from updated-products entirely: leaving the column in that file
+    // with a blank value would CLEAR a hand-corrected MPN.
+    newProductsOnly: true,
     transform: (v) => String(v).trim().replace(/\s+/g, " "),
   },
   {
     source: { attr: "Hazardous" },
-    col: "Variant Metafield: custom.is_hazmat [boolean]",
+    // Renamed from custom.is_hazmat. The old field still exists and holds the
+    // live values, so it is listed in currentFrom below to keep the safety
+    // ratchet working while the two coexist. It is never written.
+    col: "Variant Metafield: custom.hazardous [boolean]",
     compare: "string",
     // Metafield type was changed to boolean, so emit true/false, not Yes/No.
     transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
@@ -438,6 +477,7 @@ export const MATRIXIFY_FIELD_MAP = [
     // to protect and would happily downgrade genuinely hazardous coatings.
     // Consulted ONLY to establish current state for the ratchet -- never written.
     currentFrom: [
+      "Variant Metafield: custom.is_hazmat [boolean]",
       "Variant Metafield: custom.is_hazmat [single_line_text_field]",
       "Metafield: custom.is_hazmat [boolean]",
     ],
@@ -478,6 +518,49 @@ export const MATRIXIFY_FIELD_MAP = [
     compare: "dimension",
     transform: dimension,
     treatZeroAsBlank: true,
+  },
+  {
+    // Legacy hazmat field, written IN PARALLEL with custom.hazardous until the
+    // theme is updated to read the new one. The two always carry the same value.
+    source: { attr: "Hazardous" },
+    col: "Variant Metafield: custom.is_hazmat [boolean]",
+    compare: "string",
+    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+    ratchet: { protect: "true" },
+    currentFrom: [
+      "Variant Metafield: custom.hazardous [boolean]",
+      "Metafield: custom.is_hazmat [boolean]",
+    ],
+    normalizeCurrent: (v) => {
+      const t = String(v).trim().toLowerCase();
+      if (["yes", "true", "1"].includes(t)) return "true";
+      if (["no", "false", "0"].includes(t)) return "false";
+      return "";
+    },
+  },
+  {
+    source: { attr: "Ship frozen" },
+    col: "Variant Metafield: custom.ships_frozen [boolean]",
+    compare: "string",
+    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+  },
+  {
+    source: { attr: "Special packaging" },
+    col: "Variant Metafield: custom.special_packaging [boolean]",
+    compare: "string",
+    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+  },
+  {
+    // AccountMate's own copy, mirrored VERBATIM -- no decoding, no reflowing.
+    // See the note on decodeAccountMateText for what is deliberately not done.
+    source: { col: "Description" },
+    col: "Variant Metafield: custom.accountmate_description [multi_line_text_field]",
+    compare: "string",
+  },
+  {
+    source: { col: "Short description" },
+    col: "Variant Metafield: custom.accountmate_short_description [multi_line_text_field]",
+    compare: "string",
   },
   {
     // AccountMate's tiered price string, e.g. "1:93.00,13:78.00".

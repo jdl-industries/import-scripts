@@ -30,6 +30,7 @@
 
 import fs from "fs";
 import path from "path";
+import { extractSpecs, specHandle } from "./spec-parser.mjs";
 import {
   ATTRIBUTE_SLOTS,
   SURCHARGE,
@@ -198,22 +199,58 @@ function jsonBlob(v) {
   return parts.length ? JSON.stringify([parts.join("; ")]) : "";
 }
 
+/**
+ * Shopify pricing derived from AccountMate. One place, so the update path and
+ * the new-product path cannot drift.
+ *
+ *   neither surcharge set   price = AccountMate price
+ *                           compare-at CLEARED, indicator false
+ *   surcharge AMOUNT set    price = price + amount
+ *                           compare-at = amount, indicator true
+ *   surcharge PERCENT set   price = price + (price * percent/100)
+ *                           compare-at = price * percent/100, indicator true
+ *
+ * Amount wins if both are present. Clearing compare-at when the surcharge drops
+ * to zero matters: 57 SKUs currently carry a stale compare-at from a surcharge
+ * AccountMate no longer reports, which the storefront renders as a struck-out
+ * price.
+ */
 function computePricing(amRow, { allowDefaultSurcharge = false } = {}) {
   const base = parseFloat(amRow[SURCHARGE.basePriceCol]);
-  let surcharge = parseFloat(getAttr(amRow, SURCHARGE.amountAttr)) || 0;
-  let defaulted = false;
-  const pct = SURCHARGE.defaultPercentForNewProducts;
-  if (allowDefaultSurcharge && surcharge === 0 && pct && Number.isFinite(base) && base > 0) {
-    surcharge = +(base * (pct / 100)).toFixed(2);
-    defaulted = surcharge > 0;
+  const amount = parseFloat(getAttr(amRow, SURCHARGE.amountAttr)) || 0;
+  const percent = parseFloat(getAttr(amRow, SURCHARGE.percentAttr)) || 0;
+
+  let surcharge = 0;
+  let source = "";
+  if (amount > 0) {
+    surcharge = amount;
+    source = "amount";
+  } else if (percent > 0 && Number.isFinite(base)) {
+    surcharge = +(base * (percent / 100)).toFixed(2);
+    source = "percent";
   }
+
+  // New products only: AccountMate leaves both fields at 0 on newly-added
+  // items, so fall back to the catalog-standard rate. Never applied to an
+  // existing product -- those always reflect what AccountMate reports.
+  let defaulted = false;
+  const fallback = SURCHARGE.defaultPercentForNewProducts;
+  if (allowDefaultSurcharge && surcharge === 0 && fallback && Number.isFinite(base) && base > 0) {
+    surcharge = +(base * (fallback / 100)).toFixed(2);
+    defaulted = surcharge > 0;
+    source = "default";
+  }
+
   return {
     price: Number.isFinite(base) ? (base + surcharge).toFixed(2) : "",
+    // "" means CLEAR the field -- not "leave it alone".
     compareAt: surcharge > 0 ? surcharge.toFixed(2) : "",
     hasSurcharge: surcharge > 0,
+    source,
     defaulted,
   };
 }
+
 
 // --- colour extraction (unchanged logic, see SYNC.md) ----------------------
 
@@ -336,6 +373,16 @@ function hydrateBaseline(rows, headers) {
 
 // Product-level columns that must be echoed back when adding a variant to an
 // existing product, because a blank cell would clear them.
+const APPROVED_SPECS_COL = "Metafield: custom.approved_specifications [list.metaobject_reference]";
+const MEETS_SPECS_COL = "Metafield: custom.meets_specifications [list.metaobject_reference]";
+
+/** AccountMate spec lists -> metaobject references for the two product fields. */
+function specMetafields(amRow) {
+  const { approved, meets } = extractSpecs(amRow);
+  const refs = (list) => list.map((t) => `product_specification.${specHandle(t)}`).join(", ");
+  return { [APPROVED_SPECS_COL]: refs(approved), [MEETS_SPECS_COL]: refs(meets) };
+}
+
 const MIGRATION_COLOUR_PATTERN_COL = "Metafield: shopify.color-pattern [list.metaobject_reference]";
 const MIGRATION_SAE_COL = "Metafield: custom.sae_color [single_line_text_field]";
 
@@ -353,6 +400,8 @@ const PRODUCT_LEVEL_CARRY = [
   MIGRATION_COLOUR_PATTERN_COL,
   MIGRATION_SAE_COL,
   SIZE_METAFIELD_COL,
+  APPROVED_SPECS_COL,
+  MEETS_SPECS_COL,
   ...CATEGORY_COLUMNS,
   "Metafield: custom.mil_specs [list.metaobject_reference]",
   "Metafield: custom.qpl [list.metaobject_reference]",
@@ -450,6 +499,8 @@ function detectChanges(amRow, baseRow, baselineHasColumn) {
   const undiffable = [];
 
   for (const f of MATRIXIFY_FIELD_MAP) {
+    // Set once at creation, then owned by hand -- never re-synced.
+    if (f.newProductsOnly) continue;
     const raw = getSource(amRow, f.source);
 
     if (isBlank(raw, f.treatZeroAsBlank)) {
@@ -510,19 +561,40 @@ function detectChanges(amRow, baseRow, baselineHasColumn) {
   }
 
   // Pricing: base + surcharge, with the surcharge itself in compare-at.
+  // Specification lists, parsed from the AccountMate description blocks.
+  // Written in both directions: if AccountMate stops listing a spec the stale
+  // reference is cleared rather than left behind.
+  for (const [col, want] of Object.entries(specMetafields(amRow))) {
+    if (!baselineHasColumn(col)) {
+      // Column not in the export yet -- nothing to diff against, so write it
+      // and report, rather than silently skipping.
+      if (want) {
+        undiffable.push(col);
+        changes[col] = want;
+      }
+      continue;
+    }
+    if (valuesDiffer(want, baseRow[col], "string")) changes[col] = want;
+  }
+
   const pricing = computePricing(amRow);
   if (pricing.price && valuesDiffer(pricing.price, baseRow[MATRIXIFY.priceCol], "number")) {
     changes[MATRIXIFY.priceCol] = pricing.price;
   }
+  // compare-at and the indicator track the surcharge in BOTH directions: when
+  // AccountMate stops reporting one, the stale values must be cleared.
+  const curCompareAt = (baseRow[MATRIXIFY.compareAtCol] || "").trim();
   if (pricing.hasSurcharge) {
-    if (valuesDiffer(pricing.compareAt, baseRow[MATRIXIFY.compareAtCol], "number")) {
+    if (valuesDiffer(pricing.compareAt, curCompareAt, "number")) {
       changes[MATRIXIFY.compareAtCol] = pricing.compareAt;
     }
-    if (
-      baselineHasColumn(MATRIXIFY.indicatorCol) &&
-      valuesDiffer("true", baseRow[MATRIXIFY.indicatorCol], "string")
-    ) {
-      changes[MATRIXIFY.indicatorCol] = "true";
+  } else if (curCompareAt) {
+    changes[MATRIXIFY.compareAtCol] = "";
+  }
+  if (baselineHasColumn(MATRIXIFY.indicatorCol)) {
+    const want = pricing.hasSurcharge ? "true" : "false";
+    if (valuesDiffer(want, baseRow[MATRIXIFY.indicatorCol], "string")) {
+      changes[MATRIXIFY.indicatorCol] = want;
     }
   }
 
@@ -690,13 +762,35 @@ variant-metafield columns, so most fields would have nothing to diff against.
   // cell clears the field in Matrixify, the file must contain ONLY columns we
   // understand and can populate correctly -- never the full 112-column export.
   const managedColumns = [
+    APPROVED_SPECS_COL,
+    MEETS_SPECS_COL,
     MATRIXIFY.priceCol,
     MATRIXIFY.compareAtCol,
     MATRIXIFY.indicatorCol,
-    ...MATRIXIFY_FIELD_MAP.flatMap((f) => [f.col, ...Object.keys(f.companions || {})]),
+    // Written when a discontinued variant is retired in place.
+    "Variant Inventory Policy",
+    // Matrixify refuses a quantity write without a tracker: "To set inventory
+    // quantity, set also the value for Variant Inventory Tracker". Carried from
+    // the baseline so every row that writes a qty has one.
+    "Variant Inventory Tracker",
+    ...MATRIXIFY_FIELD_MAP.filter((f) => !f.newProductsOnly).flatMap((f) => [
+      f.col,
+      ...Object.keys(f.companions || {}),
+    ]),
   ].filter((c, i, a) => a.indexOf(c) === i);
 
+  // A handle is still LIVE if at least one of its variants is present in
+  // AccountMate. This distinguishes a VARIANT retirement (the product survives
+  // with its other sizes) from a PRODUCT retirement (nothing left to sell).
+  const handleHasLiveVariant = new Set();
+  for (const r of baseRows) {
+    const k = normalizeSku(r[MATRIXIFY.skuCol]);
+    if (k && amBySku.has(k)) handleHasLiveVariant.add(r[MATRIXIFY.handleCol]);
+  }
+  const isArchived = (r) => /^archived$/i.test((r["Status"] || "").trim());
+
   const updatedRows = [];
+  let retiredVariants = 0;
   const ratchetReport = [];
   const undiffableCols = new Set();
   let unchanged = 0;
@@ -713,11 +807,40 @@ variant-metafield columns, so most fields would have nothing to diff against.
       const sku = normalizeSku(target[MATRIXIFY.skuCol]);
       const amRow = sku ? amBySku.get(sku) : null;
 
-      // A baseline row with no AccountMate match is a discontinued SKU. It gets
-      // no changes, but is still carried so the file mirrors the baseline
-      // row-for-row and stays diffable against it. Writing its current values
-      // back is a no-op; retiring it is handled via deleted-products.
+      // A baseline row with no AccountMate match is a discontinued SKU.
+      //
+      // If the product still has a live variant, retire this one IN PLACE --
+      // zero the stock and stop selling it -- leaving the product and its
+      // surviving sizes alone. Archiving the whole product would take those
+      // down too. Only products with nothing left go to deleted-products.
       if (!amRow) {
+        if (!isArchived(target) && handleHasLiveVariant.has(target[MATRIXIFY.handleCol])) {
+          const row = {
+            [MATRIXIFY.handleCol]: target[MATRIXIFY.handleCol],
+            [MATRIXIFY.commandCol]: MATRIXIFY.command,
+            [MATRIXIFY.variantCommandCol]: MATRIXIFY.command,
+            [MATRIXIFY.skuCol]: target[MATRIXIFY.skuCol],
+          };
+          for (const col of managedColumns) {
+            if (row[col] === undefined) row[col] = target[col] ?? "";
+          }
+          if (target["ID"]) row["ID"] = target["ID"];
+          if (target["Variant ID"]) row["Variant ID"] = target["Variant ID"];
+
+          const changes = {};
+          if (valuesDiffer("0", target["Variant Inventory Qty"], "integer")) {
+            changes["Variant Inventory Qty"] = "0";
+          }
+          if (valuesDiffer("deny", target["Variant Inventory Policy"], "string")) {
+            changes["Variant Inventory Policy"] = "deny";
+          }
+          Object.assign(row, changes);
+          row.__changed = Object.keys(changes).join("; ");
+          if (Object.keys(changes).length) retiredVariants++;
+          if (!changedOnly || Object.keys(changes).length) updatedRows.push(row);
+          continue;
+        }
+
         if (changedOnly) continue;
         const passthrough = {
           [MATRIXIFY.handleCol]: target[MATRIXIFY.handleCol],
@@ -767,6 +890,16 @@ variant-metafield columns, so most fields would have nothing to diff against.
       row.__changed = Object.keys(changes).join("; ");
       updatedRows.push(row);
       if (verbose && hasChanges) console.log(`  UPDATE ${sku}: ${row.__changed}`);
+    }
+  }
+
+  // Any row writing a quantity must carry a tracker. Three baseline variants
+  // have neither; they only need one if AccountMate supplies stock for them,
+  // in which case "shopify" matches the other 238.
+  for (const row of updatedRows) {
+    if ((row["Variant Inventory Qty"] ?? "").toString().trim() === "") continue;
+    if (!(row["Variant Inventory Tracker"] ?? "").toString().trim()) {
+      row["Variant Inventory Tracker"] = "shopify";
     }
   }
 
@@ -859,6 +992,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
         row["Variant Requires Shipping"] = "true";
         // Category is REQUIRED: custom.size is a category metafield and is
         // rejected outright on a product with no category.
+        Object.assign(row, specMetafields(amRow));
+
         const kind = classifyCategory(groupContent?.description, groupContent?.spec);
         Object.assign(row, PRODUCT_CATEGORY[kind]);
         row["Type"] = PRODUCT_TYPE[kind];
@@ -954,10 +1089,30 @@ variant-metafield columns, so most fields would have nothing to diff against.
     newRows.push(...memberRows);
   }
 
+  // Same pairing rule as updated-products: a quantity write needs a tracker.
+  // New products get one from NEW_PRODUCT_DEFAULTS, but rows adding a size to
+  // an existing product do not, so this covers them.
+  for (const row of newRows) {
+    if ((row["Variant Inventory Qty"] ?? "").toString().trim() === "") continue;
+    if (!(row["Variant Inventory Tracker"] ?? "").toString().trim()) {
+      row["Variant Inventory Tracker"] = "shopify";
+    }
+  }
+
   // --- deleted ------------------------------------------------------------
+  // A SKU belongs here only if it is live in Shopify and absent from
+  // AccountMate. Products already Archived are retired -- listing them again
+  // every run buries the handful of genuinely new discontinuations.
   const deletedRows = [];
+  let archivedSkipped = 0;
   for (const sku of deletedSkus) {
     for (const r of baseBySku.get(sku)) {
+      if (isArchived(r)) {
+        archivedSkipped++;
+        continue;
+      }
+      // Retired in place as a variant above -- the product is still selling.
+      if (handleHasLiveVariant.has(r[MATRIXIFY.handleCol])) continue;
       deletedRows.push({
         "Variant SKU": r[MATRIXIFY.skuCol],
         Handle: r[MATRIXIFY.handleCol],
@@ -992,13 +1147,19 @@ variant-metafield columns, so most fields would have nothing to diff against.
 
   // --- report -------------------------------------------------------------
   console.log("--- Summary ---");
-  console.log(`  deleted-products : ${deletedRows.length} rows`);
+  console.log(
+    `  deleted-products : ${deletedRows.length} rows` +
+      (archivedSkipped ? `  (${archivedSkipped} already-archived row(s) skipped)` : ""),
+  );
   const changedRowCount = updatedRows.filter((r) => r.__changed).length;
   console.log(
     `  updated-products : ${updatedRows.length} rows -- ${changedRowCount} changed, ` +
       `${updatedRows.length - changedRowCount} unchanged` +
       (changedOnly ? " [--changed-only]" : ` (mirrors the ${baseRows.length}-row baseline)`),
   );
+  if (retiredVariants) {
+    console.log(`      variants retired in place: ${retiredVariants}  (qty 0 + policy deny)`);
+  }
   console.log(`  new-products     : ${newRows.length} rows`);
   console.log(`      new products created   : ${triage.newProducts}`);
   console.log(`      sizes added to existing: ${triage.addedVariants}`);
@@ -1061,12 +1222,20 @@ variant-metafield columns, so most fields would have nothing to diff against.
   const version = nextVersion(outdir, date);
 
   const idCols = ["ID", "Variant ID"];
-  const mappedCols = MATRIXIFY_FIELD_MAP.flatMap((f) => [
+  // Columns for updated-products. newProductsOnly fields are omitted: with
+  // clear-on-blank semantics, merely including the column would wipe the value.
+  const mappedCols = MATRIXIFY_FIELD_MAP.filter((f) => !f.newProductsOnly).flatMap((f) => [
     f.col,
     ...Object.keys(f.companions || {}),
   ]);
+  const newOnlyCols = MATRIXIFY_FIELD_MAP.filter((f) => f.newProductsOnly).map((f) => f.col);
   const updHeaders = [
     ...idCols,
+    APPROVED_SPECS_COL,
+    MEETS_SPECS_COL,
+    // Written when a discontinued variant is retired in place (qty 0 + deny).
+    "Variant Inventory Policy",
+    "Variant Inventory Tracker",
     MATRIXIFY.handleCol,
     MATRIXIFY.commandCol,
     MATRIXIFY.variantCommandCol,
@@ -1078,6 +1247,7 @@ variant-metafield columns, so most fields would have nothing to diff against.
   ].filter((c, i, a) => a.indexOf(c) === i);
 
   const newHeaders = [
+    ...newOnlyCols,
     MATRIXIFY.handleCol,
     MATRIXIFY.commandCol,
     MATRIXIFY.variantCommandCol,
@@ -1092,6 +1262,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
     "Metafield: custom.applications [list.single_line_text_field]",
     "Metafield: custom.parent_collection [collection_reference]",
     "Metafield: custom.nsn [single_line_text_field]",
+    APPROVED_SPECS_COL,
+    MEETS_SPECS_COL,
     "Tags",
     "Tags Command",
     SIZE_METAFIELD_COL,

@@ -92,6 +92,9 @@ export function normalizeSpec(raw) {
     // Dotted acronyms.
     .replace(/\bO\.S\.U\.?/gi, "OSU")
     .replace(/\bF\.A\.R\.?/gi, "FAR")
+    // Insert the missing space first ("AMS3095"), so the SAE rule below can see
+    // a word boundary. AccountMate writes this both ways.
+    .replace(new RegExp(`\\b(${SPACED_PREFIXES.join("|")})(\\d)`, "gi"), "$1 $2")
     // SAE AMS and AMS are the same body/spec series.
     .replace(/\bSAE\s+AMS\b/gi, "AMS")
     // A hyphen standing in for a space before a qualifier: MIL-PRF-85285-TYPE I

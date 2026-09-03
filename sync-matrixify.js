@@ -30,7 +30,7 @@
 
 import fs from "fs";
 import path from "path";
-import { extractSpecs, specHandle } from "./spec-parser.mjs";
+import { extractSpecs, specHandle, baseSpec } from "./spec-parser.mjs";
 import {
   ATTRIBUTE_SLOTS,
   SURCHARGE,
@@ -376,6 +376,39 @@ function hydrateBaseline(rows, headers) {
 const APPROVED_SPECS_COL = "Metafield: custom.approved_specifications [list.metaobject_reference]";
 const MEETS_SPECS_COL = "Metafield: custom.meets_specifications [list.metaobject_reference]";
 
+/**
+ * Base-specification tags for a product.
+ *
+ * Metafields are not indexed by Shopify search, but tags are -- and buyers
+ * commonly search the base number ("mil-prf-85285") rather than the full
+ * qualified spec. Every specification the product meets OR is approved for
+ * contributes its base. Where a spec IS its own base ("MEP 10-068") the title
+ * is used directly.
+ */
+function specBaseTags(amRow) {
+  const { approved, meets } = extractSpecs(amRow);
+  const slug = (v) => String(v).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return [...new Set([...approved, ...meets].map((t) => slug(baseSpec(t) || t)).filter(Boolean))];
+}
+
+/**
+ * Merge tags into an existing list without disturbing what is already there.
+ * Returns null when nothing new would be added, so unchanged products are not
+ * rewritten. Comparison is case-insensitive; existing order is preserved.
+ */
+function mergeTags(existing, add) {
+  const cur = String(existing || "").split(",").map((t) => t.trim()).filter(Boolean);
+  const seen = new Set(cur.map((t) => t.toLowerCase()));
+  const out = [...cur];
+  for (const t of add) {
+    if (!seen.has(t.toLowerCase())) {
+      out.push(t);
+      seen.add(t.toLowerCase());
+    }
+  }
+  return out.length === cur.length ? null : out.join(", ");
+}
+
 /** AccountMate spec lists -> metaobject references for the two product fields. */
 function specMetafields(amRow) {
   const { approved, meets } = extractSpecs(amRow);
@@ -577,6 +610,15 @@ function detectChanges(amRow, baseRow, baselineHasColumn) {
     if (valuesDiffer(want, baseRow[col], "string")) changes[col] = want;
   }
 
+  // Base-specification tags, merged into whatever the product already carries.
+  const mergedTags = mergeTags(baseRow["Tags"], specBaseTags(amRow));
+  if (mergedTags !== null) {
+    changes["Tags"] = mergedTags;
+    // The complete list is written, existing tags included, so REPLACE is
+    // idempotent and matches the convention already in the catalog.
+    changes["Tags Command"] = "REPLACE";
+  }
+
   const pricing = computePricing(amRow);
   if (pricing.price && valuesDiffer(pricing.price, baseRow[MATRIXIFY.priceCol], "number")) {
     changes[MATRIXIFY.priceCol] = pricing.price;
@@ -762,6 +804,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
   // cell clears the field in Matrixify, the file must contain ONLY columns we
   // understand and can populate correctly -- never the full 112-column export.
   const managedColumns = [
+    "Tags",
+    "Tags Command",
     APPROVED_SPECS_COL,
     MEETS_SPECS_COL,
     MATRIXIFY.priceCol,
@@ -1000,10 +1044,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
 
         // Tags: "hazmat" when the product is hazardous, plus the base form of
         // each mil spec it is qualified for ("mil-prf-85285").
-        const specTags = (groupContent?.milSpecs || "")
-          .split(",").map((x) => x.trim()).filter(Boolean).map(milSpecTag);
         const isHazmat = /^yes$/i.test(getAttr(amRow, "Hazardous"));
-        const tags = [...new Set([isHazmat ? "hazmat" : "", ...specTags].filter(Boolean))];
+        const tags = [...new Set([isHazmat ? "hazmat" : "", ...specBaseTags(amRow)].filter(Boolean))];
         if (tags.length) {
           row["Tags"] = tags.join(", ");
           row["Tags Command"] = "REPLACE";
@@ -1239,6 +1281,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
   const newOnlyCols = MATRIXIFY_FIELD_MAP.filter((f) => f.newProductsOnly).map((f) => f.col);
   const updHeaders = [
     ...idCols,
+    "Tags",
+    "Tags Command",
     APPROVED_SPECS_COL,
     MEETS_SPECS_COL,
     // Written when a discontinued variant is retired in place (qty 0 + deny).

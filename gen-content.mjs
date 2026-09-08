@@ -23,9 +23,10 @@ import {
   MIL_SPEC_PATTERNS,
   MIL_SPEC_UNMAPPABLE,
   PARENT_COLLECTION,
-  APPLICATION_ATTRS,
+  APPLICATION_FIELDS,
   classifyCategory,
 } from "./sync-config.js";
+import { readAccountMate, specStrings } from "./accountmate.mjs";
 
 // --- terse description + spec, per MPN (confirmed by the user) --------------
 const T = {
@@ -199,18 +200,17 @@ const COLOUR_WORDS = {
 const P = (f) => parse(fs.readFileSync(f), { columns: true, skip_empty_lines: true, relax_column_count: true, bom: true });
 const norm = (s) => (s || "").trim().toUpperCase().replace(/\s+/g, " ");
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-const attr = (x, n) => {
-  for (let i = 1; i <= 19; i++) if ((x[`Attribute ${i} name`] || "").trim() === n) return (x[`Attribute ${i} value(s)`] || "").trim();
-  return "";
-};
+const attr = (x, field) => (x ? AM.get(x, field) : "");
 
 const O = process.argv[2];
 const pick = (p) => fs.readdirSync(O).filter((x) => x.startsWith(p)).sort().pop();
 const np = P(O + "/" + pick("new-products"));
 const rep = P(O + "/" + pick("sync-report"));
-const am = P("AccountMate Export 2026-08-27.csv");
+// Second positional argument, defaulting to the newest export present.
+const amFile = process.argv[3] || "AccountMate Export 2026-09-04.csv";
+const AM = readAccountMate(amFile);
 const amBy = new Map();
-am.forEach((x) => x.SKU && amBy.set(norm(x.SKU), x));
+AM.rows.forEach((x) => AM.get(x, "sku") && amBy.set(norm(AM.get(x, "sku")), x));
 const action = new Map(rep.filter((r) => r.File === "new").map((r) => [r["Variant SKU"] + "||" + r.Handle, r["Handle Source"]]));
 
 const SIZE = [" G", " KIT", "-LVOC KIT", "-2G", "K-1/4 GL", "2-OZ/KIT", "2-OZ/KT", "KIT-2GL", "KIT-1GL", "K-5GL", "K-2GL", "2GLKT", "4OZ/K", "6OZ/K", "GL/KT", "QT/KT", "GK-1", "GK-2", "G-1", "_2G", "_G", "GL", "G1", "G2", "G4", "Q2", "QT"].sort((a, b) => b.length - a.length);
@@ -218,10 +218,7 @@ const base = (s) => { let v = norm(s); for (const t of SIZE) if (v.endsWith(t)) 
 
 /** Colour phrase from the AccountMate "Color specs:" block, e.g. "BAC 701 BLACK". */
 function colourPhrase(amRow) {
-  const d = String(amRow?.["Short description"] || "").replace(/\\n/g, "\n");
-  const m = d.match(/Color specs:<\/i><\/strong>\s*([^\n<]+)/i);
-  if (!m) return "";
-  return m[1].trim().replace(/\s+/g, " ");
+  return attr(amRow, "colorSpecs").replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -289,7 +286,9 @@ for (const r of np) {
 
   // Lead sentence: unique per product. Part number + colour + what it is + spec.
   const colour = colourPhrase(amRow);
-  const amColour = attr(amRow || {}, "Color");
+  // The AccountMate "Color" field is broad names only; "Color specs" carries
+  // the actual code.
+  const amColour = attr(amRow, "colorSpecs");
   const leadNoun = LEAD_OVERRIDE[mpn] || desc.toLowerCase();
   const lead =
     `<p><strong>Hentzen ${mpn}</strong> is a ${leadNoun}` +
@@ -305,10 +304,9 @@ for (const r of np) {
   const body = bodyParts.join("\n");
 
   // --- specifications ------------------------------------------------------
-  const qplBlock = specBlock(amRow, "QPL");
-  const meetsBlock = specBlock(amRow, "Meets the requirements of");
-  const qplSpecs = splitSpecs(qplBlock);
-  const allSpecs = [...qplSpecs, ...splitSpecs(meetsBlock)];
+  const rawSpecs = specStrings(amRow, AM.get, AM.format);
+  const qplSpecs = rawSpecs.approved;
+  const allSpecs = [...rawSpecs.approved, ...rawSpecs.meets];
 
   // custom.qpl: only specs named in the QPL block -- that block is the
   // certification claim; "Meets the requirements of" is not the same thing.
@@ -319,7 +317,7 @@ for (const r of np) {
   const compliance = [...new Set(allSpecs.filter((x) => !/\bMIL-/i.test(x)))];
 
   const category = classifyCategory(desc, spec);
-  const applications = APPLICATION_ATTRS.filter((n) => /^yes$/i.test(attr(amRow || {}, n)));
+  const applications = APPLICATION_FIELDS.filter(([f]) => /^yes$/i.test(attr(amRow, f))).map(([, label]) => label);
 
   rows.push({
     SKU: r["Variant SKU"],
@@ -344,6 +342,23 @@ for (const r of np) {
     Spec: spec,
     Family: fam ? fam.family : "(none)",
   });
+}
+
+// Never clobber authored content with an empty or smaller file. A run with no
+// new products legitimately drafts nothing, and silently truncating the file
+// would discard hand-edited titles and descriptions.
+if (fs.existsSync("new-product-content.csv")) {
+  const existingRows = parse(fs.readFileSync("new-product-content.csv"), {
+    columns: true, skip_empty_lines: true, relax_column_count: true, bom: true,
+  }).length;
+  if (rows.length < existingRows) {
+    console.log(
+      `\nREFUSING TO WRITE: drafted ${rows.length} product(s) but ` +
+        `new-product-content.csv already holds ${existingRows}.\n` +
+        `Nothing was changed. Delete the file first if you really mean to regenerate it.`,
+    );
+    process.exit(0);
+  }
 }
 
 const H = [

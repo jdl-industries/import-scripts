@@ -30,7 +30,8 @@
 
 import fs from "fs";
 import path from "path";
-import { extractSpecs, specHandle, baseSpec } from "./spec-parser.mjs";
+import { specTitle, specHandle, baseSpec, expandSpec } from "./spec-parser.mjs";
+import { readAccountMate, specStrings } from "./accountmate.mjs";
 import {
   ATTRIBUTE_SLOTS,
   SURCHARGE,
@@ -126,17 +127,11 @@ function writeCSV(file, headers, rows) {
 
 const normalizeSku = (s) => (s || "").trim().toUpperCase().replace(/\s+/g, " ");
 
-function getAttr(row, name) {
-  for (let i = 1; i <= ATTRIBUTE_SLOTS; i++) {
-    if ((row[`Attribute ${i} name`] || "").trim() === name) {
-      return (row[`Attribute ${i} value(s)`] || "").trim();
-    }
-  }
-  return "";
-}
+/** Canonical field lookup, resolved by the format adapter. */
+const getField = (row, field) => (AM ? AM.get(row, field) : "");
 
 const getSource = (row, source) =>
-  source.attr ? getAttr(row, source.attr) : (row[source.col] || "").trim();
+  source.field ? getField(row, source.field) : String(row[source.col] ?? "").trim();
 
 function isBlank(v, treatZeroAsBlank) {
   if (v === "" || v == null) return true;
@@ -216,9 +211,9 @@ function jsonBlob(v) {
  * price.
  */
 function computePricing(amRow, { allowDefaultSurcharge = false } = {}) {
-  const base = parseFloat(amRow[SURCHARGE.basePriceCol]);
-  const amount = parseFloat(getAttr(amRow, SURCHARGE.amountAttr)) || 0;
-  const percent = parseFloat(getAttr(amRow, SURCHARGE.percentAttr)) || 0;
+  const base = parseFloat(getField(amRow, SURCHARGE.basePriceField));
+  const amount = parseFloat(getField(amRow, SURCHARGE.amountField)) || 0;
+  const percent = parseFloat(getField(amRow, SURCHARGE.percentField)) || 0;
 
   let surcharge = 0;
   let source = "";
@@ -373,6 +368,21 @@ function hydrateBaseline(rows, headers) {
 
 // Product-level columns that must be echoed back when adding a variant to an
 // existing product, because a blank cell would clear them.
+// Set by main() once the AccountMate file is read; every field lookup goes
+// through it so this file is agnostic to which export format was supplied.
+let AM = null;
+
+/**
+ * Specifications for a product, normalised and expanded. The named export has
+ * dedicated QPL / Meets specs columns; the legacy one required regex-parsing
+ * them out of the description HTML. Either way the same pipeline applies.
+ */
+function productSpecs(amRow) {
+  const raw = specStrings(amRow, AM.get, AM.format);
+  const clean = (list) => [...new Set(list.flatMap((x) => expandSpec(x)).filter((x) => x && x.length > 2))];
+  return { approved: clean(raw.approved), meets: clean(raw.meets) };
+}
+
 const APPROVED_SPECS_COL = "Metafield: custom.approved_specifications [list.metaobject_reference]";
 const MEETS_SPECS_COL = "Metafield: custom.meets_specifications [list.metaobject_reference]";
 
@@ -385,10 +395,42 @@ const MEETS_SPECS_COL = "Metafield: custom.meets_specifications [list.metaobject
  * contributes its base. Where a spec IS its own base ("MEP 10-068") the title
  * is used directly.
  */
+const tagSlug = (v) => String(v).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+/**
+ * Searchable tags for a product.
+ *
+ * Metafields are not indexed by Shopify search but tags are, and buyers search
+ * base spec numbers, series codes and colour codes rather than fully qualified
+ * strings. Three sources contribute:
+ *
+ *   specifications  the BASE of every spec met or approved ("mil-prf-85285")
+ *   series          the family code ("pg-6")
+ *   NSN             the national stock number ("8010-01-582-7282")
+ *   colour specs    the normalised colour code ("37038", "bac-707")
+ *
+ * Colour specs are messy in the source -- "BAC  707  GRAY", "BLACK FCS# 37038",
+ * "BAC 706; FSD 37038" -- so they go through the same extractor used for the
+ * colour metafield, which yields the canonical code.
+ */
 function specBaseTags(amRow) {
-  const { approved, meets } = extractSpecs(amRow);
-  const slug = (v) => String(v).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return [...new Set([...approved, ...meets].map((t) => slug(baseSpec(t) || t)).filter(Boolean))];
+  const { approved, meets } = productSpecs(amRow);
+  const tags = [...approved, ...meets].map((t) => tagSlug(baseSpec(t) || t));
+
+  const series = getField(amRow, "series");
+  if (series) tags.push(tagSlug(series));
+
+  // NSN is a primary search key for military buyers.
+  const nsn = getField(amRow, "nsn");
+  if (nsn) tags.push(tagSlug(nsn));
+
+  // Semicolon-delimited; each part carries at most one code.
+  for (const part of getField(amRow, "colorSpecs").split(";")) {
+    const c = extractColor(part);
+    if (c) tags.push(tagSlug(c.value));
+  }
+
+  return [...new Set(tags.filter(Boolean))];
 }
 
 /**
@@ -411,7 +453,7 @@ function mergeTags(existing, add) {
 
 /** AccountMate spec lists -> metaobject references for the two product fields. */
 function specMetafields(amRow) {
-  const { approved, meets } = extractSpecs(amRow);
+  const { approved, meets } = productSpecs(amRow);
   const refs = (list) => list.map((t) => `product_specification.${specHandle(t)}`).join(", ");
   return { [APPROVED_SPECS_COL]: refs(approved), [MEETS_SPECS_COL]: refs(meets) };
 }
@@ -496,7 +538,7 @@ function resolveSize(sku, amRow) {
     }
   }
   if (amRow) {
-    const uom = getAttr(amRow, "Unit of Measure").toUpperCase();
+    const uom = getField(amRow, "unitOfMeasure").toUpperCase();
     if (UOM_TO_SIZE[uom]) return { value: UOM_TO_SIZE[uom], source: "AccountMate UoM" };
     if (uom) return { value: "", source: "", unmappedUom: uom };
   }
@@ -536,16 +578,19 @@ function detectChanges(amRow, baseRow, baselineHasColumn) {
     if (f.newProductsOnly) continue;
     const raw = getSource(amRow, f.source);
 
-    if (isBlank(raw, f.treatZeroAsBlank)) {
-      if (!(f.blankPolicy === "overwrite" && raw !== "")) {
-        const cur = (baseRow[f.col] || "").trim();
-        if (cur) skipped.push({ col: f.col, current: cur, reason: "blank in AccountMate" });
-        continue;
-      }
+    // blankPolicy "overwrite" means an EMPTY AccountMate value is written
+    // through, clearing the field. The previous guard also required
+    // `raw !== ""`, which made the policy a no-op for genuinely empty values --
+    // the exact case it exists for.
+    const overwriteBlank = f.blankPolicy === "overwrite";
+    if (isBlank(raw, f.treatZeroAsBlank) && !overwriteBlank) {
+      const cur = (baseRow[f.col] || "").trim();
+      if (cur) skipped.push({ col: f.col, current: cur, reason: "blank in AccountMate" });
+      continue;
     }
 
     const value = f.transform ? f.transform(raw) : raw;
-    if (value === "" || value == null) continue;
+    if ((value === "" || value == null) && !overwriteBlank) continue;
 
     // If the baseline export lacks this column we cannot know the current
     // value. MERGE makes writing it harmless, but say so rather than pretending
@@ -697,13 +742,14 @@ variant-metafield columns, so most fields would have nothing to diff against.
   );
   const [amFile, baseFile] = positional;
 
-  const { rows: amRows } = parseCSV(fs.readFileSync(amFile, "utf-8"));
+  AM = readAccountMate(amFile);
+  const amRows = AM.rows;
   const { headers: baseHeaders, rows: baseRowsRaw } = parseCSV(fs.readFileSync(baseFile, "utf-8"));
   const baseRows = hydrateBaseline(baseRowsRaw, baseHeaders);
   const headerSet = new Set(baseHeaders);
   const baselineHasColumn = (c) => headerSet.has(c);
 
-  console.log(`AccountMate: ${amFile}  (${amRows.length} rows)`);
+  console.log(`AccountMate: ${amFile}  (${amRows.length} rows, ${AM.format} format)`);
   console.log(`Baseline:    ${baseFile}  (${baseRows.length} rows)`);
 
   // Warn loudly if the baseline is a Shopify admin export rather than Matrixify.
@@ -730,7 +776,7 @@ variant-metafield columns, so most fields would have nothing to diff against.
   const amBySku = new Map();
   const wsOnly = [];
   for (const r of amRows) {
-    const raw = (r.SKU || "").trim();
+    const raw = AM.get(r, "sku");
     if (!raw) continue;
     const sku = normalizeSku(raw);
     amBySku.set(sku, r);
@@ -782,15 +828,19 @@ variant-metafield columns, so most fields would have nothing to diff against.
   let added = 0;
   for (const { sku, amRow } of newSkus) {
     if (colorMap.has(sku)) continue;
-    const g = extractColor(amRow["Short description"]);
+    // The named format has a dedicated Color specs column carrying the code;
+    // the legacy one only had it buried in the description text.
+    const g = extractColor(getField(amRow, "colorSpecs") || getField(amRow, "shortDescription"));
     colorMap.set(sku, {
       SKU: sku,
       "Confirmed Color": "",
       "Extracted Guess": g ? g.value : "",
       Source: g ? g.source : "",
       Confidence: g ? g.confidence : "",
-      "AccountMate Color": getAttr(amRow, "Color"),
-      Evidence: g ? g.snippet : decodeDescription(amRow["Short description"]).split(/\n/)[0].slice(0, 120),
+      // The AccountMate "Color" field is unused: 13 broad names ("WHITE") that
+      // cannot resolve to a colour handle. "Color specs" carries the code.
+      "AccountMate Color": getField(amRow, "colorSpecs"),
+      Evidence: g ? g.snippet : getField(amRow, "colorSpecs") || getField(amRow, "shortDescription").slice(0, 120),
     });
     added++;
   }
@@ -1003,7 +1053,7 @@ variant-metafield columns, so most fields would have nothing to diff against.
       const row = {
         [MATRIXIFY.commandCol]: MATRIXIFY.command,
         [MATRIXIFY.variantCommandCol]: MATRIXIFY.command,
-        [MATRIXIFY.skuCol]: amRow.SKU,
+        [MATRIXIFY.skuCol]: AM.get(amRow, "sku"),
         "Option1 Name": "Size",
         "Option1 Value": size.value || "NEEDS-SIZE",
       };
@@ -1024,11 +1074,11 @@ variant-metafield columns, so most fields would have nothing to diff against.
         row[MATRIXIFY.handleCol] = groupContent?.handle || buildHandle(amRow, sku);
         // AccountMate's Name is just the SKU, so an authored title is the only
         // usable source. Falls back to the SKU and is flagged for review.
-        row["Title"] = groupContent?.title || (amRow.Name || sku).trim();
-        row["Body HTML"] = groupContent?.body || amRow.Description || "";
+        row["Title"] = groupContent?.title || sku;
+        row["Body HTML"] = groupContent?.body || getField(amRow, "description") || "";
         row["Status"] = NEW_PRODUCT_DEFAULTS.Status;
         row["Published"] = NEW_PRODUCT_DEFAULTS.Published;
-        row["Vendor"] = getAttr(amRow, "Manufacturer") || NEW_PRODUCT_DEFAULTS.Vendor;
+        row["Vendor"] = getField(amRow, "manufacturer") || NEW_PRODUCT_DEFAULTS.Vendor;
         row["Variant Taxable"] = "true";
         row["Variant Inventory Tracker"] = "shopify";
         row["Variant Inventory Policy"] = "deny";
@@ -1044,7 +1094,7 @@ variant-metafield columns, so most fields would have nothing to diff against.
 
         // Tags: "hazmat" when the product is hazardous, plus the base form of
         // each mil spec it is qualified for ("mil-prf-85285").
-        const isHazmat = /^yes$/i.test(getAttr(amRow, "Hazardous"));
+        const isHazmat = /^yes$/i.test(getField(amRow, "hazardous"));
         const tags = [...new Set([isHazmat ? "hazmat" : "", ...specBaseTags(amRow)].filter(Boolean))];
         if (tags.length) {
           row["Tags"] = tags.join(", ");

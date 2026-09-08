@@ -39,7 +39,7 @@ export const ATTRIBUTE_SLOTS = 19;
 // every row look changed.
 export const FIELD_MAP = [
   {
-    source: { col: "Stock" },
+    source: { field: "onHand" },
     shopifyCol: "Variant Inventory Qty",
     compare: "integer",
     // Stock legitimately goes to 0; that is a real value, not a blank.
@@ -47,7 +47,7 @@ export const FIELD_MAP = [
     treatZeroAsBlank: false,
   },
   {
-    source: { col: "Weight (lbs)" },
+    source: { field: "weight" },
     shopifyCol: "Variant Grams",
     compare: "number",
     // Shopify stores unrounded grams (23 lb -> 10432.62451), so use the exact
@@ -62,13 +62,13 @@ export const FIELD_MAP = [
     treatZeroAsBlank: true,
   },
   {
-    source: { attr: "Cost" },
+    source: { field: "cost" },
     shopifyCol: "Cost per item",
     compare: "number",
     treatZeroAsBlank: true,
   },
   {
-    source: { attr: "Hazardous" },
+    source: { field: "hazardous" },
     shopifyCol: "Is Hazmat? (product.metafields.custom.is_hazmat)",
     compare: "string",
     scope: "product",
@@ -81,18 +81,18 @@ export const FIELD_MAP = [
     ratchet: { protect: "TRUE" },
   },
   {
-    source: { attr: "Lead time" },
+    source: { field: "leadTime" },
     shopifyCol: "Lead time (product.metafields.custom.lead_time)",
     compare: "string",
     scope: "product",
-    // AccountMate says "15 business days"; Shopify's metafield holds "15".
+    // Legacy wrote "15 business days"; the named format supplies a bare 15.
     transform: (v) => {
       const m = String(v).match(/(\d+)/);
       return m ? m[1] : "";
     },
   },
   {
-    source: { attr: "Vendor SKU" },
+    source: { field: "vendorPartNumber" },
     // Variant-level MPN metafield created by the Google channel app. This is the
     // right home for Vendor SKU: AccountMate carries one per SKU, and unlike the
     // product-level custom.manufacturer_part_number metafield it can hold a
@@ -134,9 +134,9 @@ export const UPDATABLE_COLUMNS = [
 // itself, and a metafield flags the convention. This is the ONLY place
 // Variant Price is computed.
 export const SURCHARGE = {
-  amountAttr: "Surcharge amount",
-  percentAttr: "Surcharge percent",
-  basePriceCol: "Regular price",
+  amountField: "surchargeAmount",
+  percentField: "surchargePercent",
+  basePriceField: "price",
   priceCol: "Variant Price",
   compareAtCol: "Variant Compare At Price",
   indicatorCol:
@@ -426,7 +426,7 @@ const dimension = (v) => {
 
 export const MATRIXIFY_FIELD_MAP = [
   {
-    source: { col: "Stock" },
+    source: { field: "onHand" },
     col: "Variant Inventory Qty",
     compare: "integer",
     blankPolicy: "overwrite",
@@ -434,16 +434,16 @@ export const MATRIXIFY_FIELD_MAP = [
   {
     // Matrixify takes weight in its native unit -- no gram conversion, which
     // also retires the fractional-gram comparison problem.
-    source: { col: "Weight (lbs)" },
+    source: { field: "weight" },
     col: "Variant Weight",
     compare: "number",
     tolerance: 0.01,
     treatZeroAsBlank: true,
     companions: { "Variant Weight Unit": "lb" },
   },
-  { source: { attr: "Cost" }, col: "Variant Cost", compare: "number", treatZeroAsBlank: true },
+  { source: { field: "cost" }, col: "Variant Cost", compare: "number", treatZeroAsBlank: true },
   {
-    source: { attr: "Vendor SKU" },
+    source: { field: "vendorPartNumber" },
     // The Google channel's variant-level MPN metafield.
     //
     // NOT custom.manufacturer_part_number: that key is defined at PRODUCT scope
@@ -462,7 +462,7 @@ export const MATRIXIFY_FIELD_MAP = [
     transform: (v) => String(v).trim().replace(/\s+/g, " "),
   },
   {
-    source: { attr: "Hazardous" },
+    source: { field: "hazardous" },
     // Renamed from custom.is_hazmat. The old field still exists and holds the
     // live values, so it is listed in currentFrom below to keep the safety
     // ratchet working while the two coexist. It is never written.
@@ -490,7 +490,7 @@ export const MATRIXIFY_FIELD_MAP = [
     },
   },
   {
-    source: { attr: "Lead time" },
+    source: { field: "leadTime" },
     col: "Variant Metafield: custom.lead_time [number_integer]",
     compare: "integer",
     transform: (v) => {
@@ -499,21 +499,21 @@ export const MATRIXIFY_FIELD_MAP = [
     },
   },
   {
-    source: { col: "Length (in)" },
+    source: { field: "length" },
     col: "Variant Metafield: custom.length [dimension]",
     compare: "dimension",
     transform: dimension,
     treatZeroAsBlank: true,
   },
   {
-    source: { col: "Width (in)" },
+    source: { field: "width" },
     col: "Variant Metafield: custom.width [dimension]",
     compare: "dimension",
     transform: dimension,
     treatZeroAsBlank: true,
   },
   {
-    source: { col: "Height (in)" },
+    source: { field: "height" },
     col: "Variant Metafield: custom.height [dimension]",
     compare: "dimension",
     transform: dimension,
@@ -522,7 +522,7 @@ export const MATRIXIFY_FIELD_MAP = [
   {
     // Legacy hazmat field, written IN PARALLEL with custom.hazardous until the
     // theme is updated to read the new one. The two always carry the same value.
-    source: { attr: "Hazardous" },
+    source: { field: "hazardous" },
     col: "Variant Metafield: custom.is_hazmat [boolean]",
     compare: "string",
     transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
@@ -539,35 +539,54 @@ export const MATRIXIFY_FIELD_MAP = [
     },
   },
   {
-    source: { attr: "Ship frozen" },
+    source: { field: "needsDryIce" },
     col: "Variant Metafield: custom.ships_frozen [boolean]",
     compare: "string",
     transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
   },
   {
-    source: { attr: "Special packaging" },
+    source: { field: "needsSpecialPkg" },
     col: "Variant Metafield: custom.special_packaging [boolean]",
     compare: "string",
     transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
   },
   {
     // AccountMate's own copy, mirrored VERBATIM -- no decoding, no reflowing.
-    // See the note on decodeAccountMateText for what is deliberately not done.
-    source: { col: "Description" },
+    // Blanks ARE written through, clearing the metafield: the field mirrors
+    // AccountMate exactly. The named format populates these on only 33 of 140
+    // rows, so most products will have them cleared.
+    source: { field: "description" },
     col: "Variant Metafield: custom.accountmate_description [multi_line_text_field]",
     compare: "string",
+    blankPolicy: "overwrite",
   },
   {
-    source: { col: "Short description" },
+    source: { field: "shortDescription" },
     col: "Variant Metafield: custom.accountmate_short_description [multi_line_text_field]",
     compare: "string",
+    blankPolicy: "overwrite",
+  },
+  {
+    // Product family / series, e.g. "PG-6".
+    source: { field: "series" },
+    col: "Metafield: custom.series [single_line_text_field]",
+    compare: "string",
+    scope: "product",
+  },
+  {
+    // Newly available in the named export format (8 of 140 rows).
+    source: { field: "nsn" },
+    col: "Metafield: custom.nsn [single_line_text_field]",
+    compare: "string",
+    scope: "product",
   },
   {
     // AccountMate's tiered price string, e.g. "1:93.00,13:78.00".
-    source: { col: "Fixed Tiered Prices" },
+    source: { field: "tierPrice" },
     col: "Variant Metafield: custom.accountmate_tiered_prices [single_line_text_field]",
     compare: "string",
-    transform: (v) => String(v).trim(),
+    // The export wraps this field in stray doubled quotes -- see accountmate.mjs.
+    transform: (v) => String(v).replace(/^"+|"+$/g, "").trim(),
   },
 ];
 
@@ -786,7 +805,11 @@ export const PARENT_COLLECTION = {
   carc: "chemical-agent-resistive-coatings-carc",
 };
 
-export const APPLICATION_ATTRS = ["Aviation", "Marine", "Industrial"];
+export const APPLICATION_FIELDS = [
+  ["aviation", "Aviation"],
+  ["marine", "Marine"],
+  ["industrial", "Industrial"],
+];
 
 // Shopify "Type", per category. Title-case, matching the 3 values in use.
 export const PRODUCT_TYPE = { primer: "Primer", topcoat: "Topcoat", carc: "CARC" };

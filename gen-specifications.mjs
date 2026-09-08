@@ -4,9 +4,11 @@
  * Emit a Matrixify Metaobjects sheet for Product Specifications that do not
  * exist yet.
  *
- * Specs are parsed out of the AccountMate description blocks, normalised, and
- * matched case-insensitively by title against the existing export. Only the
- * missing ones are written, so re-running is safe.
+ * Specs come from AccountMate's QPL / Meets specs columns (or, in the legacy
+ * export format, are regex-parsed out of the description blocks -- the reader
+ * hides the difference). They are normalised, expanded where one string encodes
+ * several specs, and matched case-insensitively by title against the existing
+ * export. Only the missing ones are written, so re-running is safe.
  *
  * Usage:
  *   node gen-specifications.mjs <accountmate.csv> [existing-specs.csv] [--outdir dir]
@@ -15,7 +17,8 @@
 import fs from "fs";
 import path from "path";
 import { parse } from "csv-parse/sync";
-import { extractSpecs, specTitle, specHandle, baseSpec, governingBody } from "./spec-parser.mjs";
+import { expandSpec, specHandle, baseSpec, governingBody } from "./spec-parser.mjs";
+import { readAccountMate, specStrings } from "./accountmate.mjs";
 
 const P = (f) => parse(fs.readFileSync(f), { columns: true, skip_empty_lines: true, relax_column_count: true, bom: true });
 const esc = (v) => {
@@ -52,10 +55,17 @@ if (fs.existsSync(existingFile)) {
 }
 
 // --- specs referenced by AccountMate ---------------------------------------
-const am = P(amFile);
+// The named export has dedicated QPL / Meets specs columns; the legacy one
+// required regex-parsing them out of the description HTML. The adapter hides
+// the difference, and the same normalise -> expand pipeline runs either way.
+const AM = readAccountMate(amFile);
+const am = AM.rows;
 const seen = new Map(); // title -> { approvedFor, meetsFor }
 for (const row of am) {
-  const { approved, meets } = extractSpecs(row);
+  const raw = specStrings(row, AM.get, AM.format);
+  const clean = (list) => [...new Set(list.flatMap((x) => expandSpec(x)).filter((x) => x && x.length > 2))];
+  const approved = clean(raw.approved);
+  const meets = clean(raw.meets);
   for (const t of approved) {
     if (!seen.has(t)) seen.set(t, { approved: 0, meets: 0 });
     seen.get(t).approved++;
@@ -100,7 +110,7 @@ for (const title of missing) {
   });
 }
 
-console.log(`AccountMate: ${amFile}`);
+console.log(`AccountMate: ${amFile}  (${am.length} rows, ${AM.format} format)`);
 console.log(`Existing specs: ${existingFile}  (${existing.size} known)\n`);
 console.log(`specifications referenced by AccountMate : ${seen.size}`);
 console.log(`  already exist                          : ${present.length}`);

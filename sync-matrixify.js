@@ -33,7 +33,6 @@ import path from "path";
 import { specTitle, specHandle, baseSpec, expandSpec } from "./spec-parser.mjs";
 import { readAccountMate, specStrings } from "./accountmate.mjs";
 import {
-  ATTRIBUTE_SLOTS,
   SURCHARGE,
   UOM_TO_SIZE,
   SKU_SUFFIX_SIZE_OVERRIDE,
@@ -45,7 +44,6 @@ import {
   COLOR_PATTERNS,
   COLOR_SCOPE_CONFIDENCE,
   COLOR_MAP_FILE,
-  NEEDS_COLOR_PLACEHOLDER,
   NEW_PRODUCT_DEFAULTS,
   MATRIXIFY,
   MATRIXIFY_FIELD_MAP,
@@ -54,7 +52,6 @@ import {
   CATEGORY_COLUMNS,
   classifyCategory,
   PRODUCT_TYPE,
-  milSpecTag,
 } from "./sync-config.js";
 
 // ===========================================================================

@@ -12,123 +12,6 @@
 // "Attribute N value(s)" column pairs. The positions are stable today, but we
 // resolve by NAME so a reordered export doesn't silently shift every value.
 export const ATTRIBUTE_SLOTS = 19;
-
-// ---------------------------------------------------------------------------
-// Field mapping: AccountMate -> Shopify
-// ---------------------------------------------------------------------------
-// `source` is either { col: "<AccountMate column>" } or { attr: "<attribute name>" }.
-// `compare` selects the equality test (number | integer | string).
-// `transform` converts the AccountMate value to its Shopify representation.
-// `tolerance` overrides the numeric equality threshold (default 0.01).
-// `scope`:
-//   "variant" - the value lives on the variant row (default)
-//   "product" - a product.metafields.* value, shared by every variant of the
-//               product. Shopify only populates these on a product's FIRST row,
-//               so they must be compared and written once per product, never
-//               per variant.
-// `blankPolicy`:
-//   "skip"      - a blank/zero AccountMate value never overwrites Shopify (default)
-//   "overwrite" - blank AccountMate values are written through
-// `newProductsOnly`:
-//   true        - written when a product is created, never on updates, and the
-//                 column is omitted from updated-products so it cannot be cleared
-//
-// NOTE: "Variant Price" is deliberately absent. Shopify's price is base price
-// PLUS surcharge, so it is computed in one place (see SURCHARGE) rather than
-// mapped directly from "Regular price" -- mapping both double-counts and makes
-// every row look changed.
-export const FIELD_MAP = [
-  {
-    source: { field: "onHand" },
-    shopifyCol: "Variant Inventory Qty",
-    compare: "integer",
-    // Stock legitimately goes to 0; that is a real value, not a blank.
-    blankPolicy: "overwrite",
-    treatZeroAsBlank: false,
-  },
-  {
-    source: { field: "weight" },
-    shopifyCol: "Variant Grams",
-    compare: "number",
-    // Shopify stores unrounded grams (23 lb -> 10432.62451), so use the exact
-    // conversion factor and a 1-gram tolerance. Rounding here made all 144
-    // matched variants look changed.
-    transform: (lbs) => {
-      const n = parseFloat(lbs);
-      return Number.isFinite(n) ? +(n * 453.59237).toFixed(5) : "";
-    },
-    tolerance: 1,
-    // AccountMate frequently exports 0.00 weights that are simply missing data.
-    treatZeroAsBlank: true,
-  },
-  {
-    source: { field: "cost" },
-    shopifyCol: "Cost per item",
-    compare: "number",
-    treatZeroAsBlank: true,
-  },
-  {
-    source: { field: "hazardous" },
-    shopifyCol: "Is Hazmat? (product.metafields.custom.is_hazmat)",
-    compare: "string",
-    scope: "product",
-    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "TRUE" : "FALSE"),
-    // Safety ratchet. Shopify flags 168/172 variants as hazmat; AccountMate
-    // would downgrade 13 solvent-based coatings to FALSE. A wrong hazmat flag
-    // is a shipping-compliance problem, so TRUE -> FALSE is reported for manual
-    // review and never written. FALSE -> TRUE still flows through normally.
-    // Delete this line to let AccountMate win in both directions.
-    ratchet: { protect: "TRUE" },
-  },
-  {
-    source: { field: "leadTime" },
-    shopifyCol: "Lead time (product.metafields.custom.lead_time)",
-    compare: "string",
-    scope: "product",
-    // Legacy wrote "15 business days"; the named format supplies a bare 15.
-    transform: (v) => {
-      const m = String(v).match(/(\d+)/);
-      return m ? m[1] : "";
-    },
-  },
-  {
-    source: { field: "vendorPartNumber" },
-    // Variant-level MPN metafield created by the Google channel app. This is the
-    // right home for Vendor SKU: AccountMate carries one per SKU, and unlike the
-    // product-level custom.manufacturer_part_number metafield it can hold a
-    // different value for each variant of a product.
-    shopifyCol: "Google Shopping / MPN",
-    compare: "string",
-    scope: "variant",
-    // AccountMate values carry stray internal whitespace
-    // ("K32236WPX-T2  CAT 06480CMU"). Collapse it, but leave the content alone --
-    // some values are legitimately compound ("... + CAT 06480CMU") or
-    // multi-valued ("PG-6-G1, PG6G1") and trimming those is a content decision.
-    transform: (v) => String(v).trim().replace(/\s+/g, " "),
-  },
-];
-
-// The product-level custom.manufacturer_part_number metafield is deliberately
-// NOT mapped. It holds a single value per product, so on multi-variant products
-// the per-SKU Vendor SKUs conflict and nothing can be written safely. It is left
-// untouched in Shopify; "Google Shopping / MPN" above carries the sync instead.
-
-// Columns the sync is permitted to change on EXISTING products. Anything not
-// listed here is Shopify's to own (titles, body copy, SEO, images, tags...).
-// A mapped field that is not in this list is computed and reported but never written.
-export const UPDATABLE_COLUMNS = [
-  "Variant Price",
-  "Variant Compare At Price",
-  "Variant Inventory Qty",
-  "Variant Grams",
-  "Cost per item",
-  "Google Shopping / MPN",
-  "Is Hazmat? (product.metafields.custom.is_hazmat)",
-  "Lead time (product.metafields.custom.lead_time)",
-  // Set as a side effect of a surcharge being present:
-  "Compare at indicates surcharge (product.metafields.custom.compare_at_indicates_surcharge)",
-];
-
 // When a surcharge amount is present, Shopify's "Variant Price" is the base
 // price PLUS the surcharge, "Variant Compare At Price" holds the surcharge
 // itself, and a metafield flags the convention. This is the ONLY place
@@ -161,37 +44,6 @@ export const SURCHARGE = {
 
 // Every column matching this pattern is a product-level metafield: Shopify
 // populates it only on a product's first row. Used when carrying values
-// forward across variant rows.
-export const PRODUCT_METAFIELD_PATTERN = /\(product\.metafields\./;
-
-// ---------------------------------------------------------------------------
-// New-product grouping: SKU prefix -> existing Shopify product handle
-// ---------------------------------------------------------------------------
-// Mined from the 12 `consolidated`-tagged products in the live catalog.
-// Longest prefix wins, so add more specific entries to override.
-//
-// NOTE: "HZK221" was mined as ambiguous (it matched both the 22169WEP and the
-// K22167WEP products). The two explicit longer prefixes below disambiguate it.
-export const PREFIX_TO_HANDLE = {
-  "AXTS-1": "hentzen-axts-1-teflon-topcoat-bms-10-86",
-  "AXSP-11": "hentzen-axsp-11g-conventional-urethane-surfacer-primer-bms-10-103",
-  "AXPG-6": "hentzen-axpg-6-high-solids-polyurethane-topcoat-mil-prf-85285-type-i",
-  HZK355: "hentzen-advanced-aerospace-polyurethane-topcoat-mil-prf-85285-type-i-iv",
-  HZK356: "hentzen-advanced-aerospace-polyurethane-topcoat-mil-prf-85285-type-i-iv",
-  HZK322: "hentzen-ground-support-polyurethane-topcoat-mil-prf-85285-type-ii",
-  HZK311: "hentzen-aerospace-polyurethane-topcoat-mil-prf-85285-type-i",
-  HZK313: "hentzen-aerospace-polyurethane-topcoat-mil-prf-85285-type-i",
-  HZ313: "hentzen-aerospace-polyurethane-topcoat-mil-prf-85285-type-i",
-  HZK315: "hentzen-aerospace-polyurethane-topcoat-mil-prf-85285-type-i",
-  HZK316: "hentzen-aerospace-polyurethane-topcoat-mil-prf-85285-type-i",
-  HZK22169: "hentzen-22169wep-epoxy-primer-mil-dtl-53022",
-  HZK22167: "hentzen-k22167wep-mil-dtl-53022",
-  HZK167: "hentzen-16708tep-chrome-free-epoxy-primer-mil-prf-23377",
-  HZ172: "hentzen-17292ydf-yellow-epoxy-primer-mil-prf-22750",
-  HZ170: "hentzen-17084gep-lvoc-chrome-free-low-ir-epoxy-primer-mil-prf-23377",
-  HZ086: "hentzen-polyurethane-carc-topcoat-mil-dtl-53039",
-};
-
 // ---------------------------------------------------------------------------
 // Size (Option2) resolution
 // ---------------------------------------------------------------------------
@@ -258,58 +110,6 @@ export const SIZE_VOCABULARY = [
   "4oz Kit",
   "6oz Kit",
 ];
-
-// Fallback: trailing token on the SKU -> Size. Mined from existing variants.
-export const SKU_SUFFIX_TO_SIZE = {
-  G1: "Gallon",
-  G2: "Gallon",
-  _G: "Gallon",
-  "GL/KT": "Gallon",
-  Q2: "Quart",
-  "QT/KT": "Quart",
-  QT: "Quart",
-  G4: "4 Gallon Kit",
-  "2GLKT": "2 Gallon Kit",
-  "GK-1": "1 Gallon Kit",
-  "GK-2": "2 Gallon Kit",
-  "K-1/4 GL": "1 1/4 Gallon Kit",
-  "K-5GL": "5 Gallon Kit",
-  "2-OZ/KIT": "2oz Kit",
-  "2-OZ/KT": "2oz Kit",
-  "4OZ/K": "4oz Kit",
-  // Bare-gallon markers seen on legacy SKUs: "HZ17169KLE GL", "HZK2110GVP_2G".
-  // Per the mined UoM mapping every gallon-ish pack resolves to "Gallon".
-  GL: "Gallon",
-  "_2G": "Gallon",
-  // NOTE: the live catalog maps 6OZ/K to BOTH "4oz Kit" and "6oz Touch-up Kit".
-  // Picking the more literal reading; correct here if the catalog is wrong.
-  "6OZ/K": "6oz Touch-up Kit",
-};
-
-// Order matters: longest / most specific first, since these are matched as
-// trailing tokens against the normalized SKU.
-export const SKU_SUFFIX_ORDER = [
-  "K-1/4 GL",
-  "2-OZ/KIT",
-  "2-OZ/KT",
-  "K-5GL",
-  "2GLKT",
-  "4OZ/K",
-  "6OZ/K",
-  "GL/KT",
-  "QT/KT",
-  "_2G",
-  "GK-1",
-  "GK-2",
-  "_G",
-  "GL",
-  "G1",
-  "G2",
-  "G4",
-  "Q2",
-  "QT",
-];
-
 // ---------------------------------------------------------------------------
 // Colour extraction (Option1)
 // ---------------------------------------------------------------------------
@@ -342,8 +142,6 @@ export const COLOR_MAP_FILE = "color-map.csv";
 // ---------------------------------------------------------------------------
 export const NEEDS_COLOR_PLACEHOLDER = "NEEDS-COLOR";
 
-// Tag marking a product as a consolidated (multi-variant) product.
-export const CONSOLIDATED_TAG = "consolidated";
 
 // Defaults applied to brand-new standalone products.
 export const NEW_PRODUCT_DEFAULTS = {
@@ -391,31 +189,6 @@ export const MATRIXIFY = {
  * The parallel `custom.*_in [number_decimal]` metafields are unpopulated
  * (0/14 rows) and are treated as abandoned.
  */
-/**
- * Decode AccountMate description text.
- *
- * NOT currently applied to the accountmate_description / _short_description
- * metafields: those mirror the source verbatim by request. Kept because two
- * quirks of the source will show through as a result --
- *   * the long Description field is DOUBLE-encoded ("&amp;amp;") while Short
- *     description is single ("&amp;")
- *   * both carry literal "\n" escape sequences rather than real newlines
- * Wire this in as a transform if either should be cleaned up.
- */
-export function decodeAccountMateText(v) {
-  let out = String(v || "").replace(/\\n/g, "\n");
-  let prev;
-  do {
-    prev = out;
-    out = out
-      .replace(/&amp;/g, "&")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">");
-  } while (out !== prev);
-  return out.replace(/\s*\n+\s*/g, " ").replace(/\s{2,}/g, " ").trim();
-}
 
 const dimension = (v) => {
   const n = parseFloat(v);
@@ -751,20 +524,6 @@ export function classifyCategory(description, spec) {
   if (/primer/.test(t)) return "primer";
   return "topcoat";
 }
-
-// ---------------------------------------------------------------------------
-// Specifications
-// ---------------------------------------------------------------------------
-// The 17 mil-spec metaobjects that exist. A product may only reference these.
-export const MIL_SPEC_HANDLES = [
-  "mil-dtl-53022-type-iv-class-l", "mil-dtl-53030-type-ii", "mil-dtl-53022-type-iv-class-u",
-  "mil-c-8514", "mil-prf-22750-type-ii-class-h-grade-a", "mil-prf-23377-type-ii-class-c2",
-  "mil-prf-23377-type-i-class-c2", "mil-prf-23377-type-i-class-c1", "mil-prf-23377-type-ii-class-n",
-  "mil-prf-85285-type-iv-class-h", "mil-prf-85285-type-i-class-h", "mil-prf-85285-type-ii-class-h",
-  "mil-prf-81352-type-i", "mil-prf-85582-type-ii-class-c2", "mil-prf-85582-type-i-class-c2",
-  "mil-dtl-53039-type-ix", "mil-dtl-53039-type-iv",
-];
-
 // AccountMate spec strings -> metaobject handle.
 //
 // Deliberately CONSERVATIVE. A mil-spec reference on an aerospace coating is a

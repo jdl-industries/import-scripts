@@ -31,7 +31,7 @@ import {
   SIZE_METAFIELD_COL,
   SIZE_VOCABULARY as SV_UNUSED,
   ATTRIBUTE_SLOTS,
-} from "./sync-config.js";
+} from "../sync-config.js";
 
 // --------------------------------------------------------------------------
 // CSV (shared shape with sync-matrixify.js)

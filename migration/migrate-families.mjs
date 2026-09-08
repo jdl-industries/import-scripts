@@ -22,7 +22,7 @@
 import fs from "fs";
 import path from "path";
 import { parse } from "csv-parse/sync";
-import { MIGRATION } from "./sync-config.js";
+import { MIGRATION } from "../sync-config.js";
 
 const P = (f) =>
   parse(fs.readFileSync(f), { columns: true, skip_empty_lines: true, relax_column_count: true, bom: true });

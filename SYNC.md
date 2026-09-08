@@ -1,36 +1,19 @@
-# Catalog Sync
+# JDL Shopify ⇄ AccountMate Sync
 
-Two scripts, one shared brain.
-
-| Script | Transport | Status |
-|---|---|---|
-| **`sync-matrixify.js`** | Matrixify import | **Use this.** The only path that can set variant metafields. |
-| `sync-catalog.js` | Shopify native CSV import | Superseded. Cannot set variant metafields at all. |
-
-## Why the switch
-
-Shopify's native CSV import cannot write **variant** metafields. That is where
-dimensions, lead time, MPN and hazmat live, so the native path silently failed to
-set them. The native export has zero `Variant Metafield:` columns — there is no
-column for the importer to read even in principle.
-
-Matrixify handles them, and its `Command: MERGE` semantics remove a whole class
-of problems the native path forced on us:
-
-- **No complete product blocks.** MERGE touches only the columns present in a
-  row, so a single variant can be updated — or added to an existing product — on
-  its own row. The partial-block hazard (importing a subset of a product's
-  variants and thereby deleting the rest) is gone.
-- **No full-catalog baseline, no superset file.** Output is changed rows only.
-- **Three independent files** again, each safe to import on its own.
-- **Weight needs no conversion.** `Variant Weight` + `Variant Weight Unit: lb`
-  takes AccountMate's pounds directly, retiring the fractional-gram tolerance.
-
-# `sync-matrixify.js`
+Keeps the Shopify catalog in step with the client's AccountMate ERP. AccountMate
+is the source of truth for pricing, stock, dimensions and specifications;
+Shopify owns titles, copy, images, SEO and anything merchandising-related.
 
 ```bash
-node sync-matrixify.js "AccountMate Export.csv" "matrixify-export.csv"
+# 1. create any Product Specification metaobjects the catalog references
+node gen-specifications.mjs "AccountMate Export.csv" Product_Specifications.csv
+
+# 2. produce the import files
+node sync-matrixify.js "AccountMate Export.csv" Products.csv
 ```
+
+Both inputs must be current: **`Products.csv` is a Matrixify export**, and it is
+the baseline every diff is taken against. A stale one produces wrong answers.
 
 | Option | Effect |
 |---|---|
@@ -38,213 +21,197 @@ node sync-matrixify.js "AccountMate Export.csv" "matrixify-export.csv"
 | `--date <date>` | Override the `{date}` stamp |
 | `--dry-run` | Report only, write nothing |
 | `--verbose` | Per-SKU change detail |
-| `--changed-only` | Narrow `updated-products` to just the changed rows (default mirrors the baseline) |
+| `--changed-only` | Narrow `updated-products` to changed rows (default mirrors the baseline) |
 
-## Blank cells CLEAR data
+## Files
 
-Matrixify uses a column's value whenever the column is present. **A blank cell
-erases the field — it does not mean "leave alone".** Confirmed the hard way on a
-one-row test import.
-
-Two rules follow, and both are enforced and tested:
-
-1. **Only columns the sync understands appear in the output.** 20 columns in
-   `updated-products`, not the 112 in the export. The other 92 are absent, so
-   the import cannot touch them.
-2. **Every column present carries the current value**, read from the baseline,
-   with AccountMate's changes overlaid. Never a blank where the store has data.
-
-This applies to product-level columns too. When a new variant is added to an
-existing product, its row must echo back that product's `Title`, `Body HTML`,
-`Vendor`, `Type`, `Status`, `Published` and product metafields — otherwise the
-import blanks them. That was 204 cells across 34 live products before it was
-caught.
-
-Rows *not* in the file are untouched; the hazard is confined to cells inside
-included rows.
-
-### updated-products mirrors the baseline
-
-Same row count, same row order, same identities — so it can be diffed against the
-Matrixify export to see exactly what will change. Rows already have to carry
-complete current values anyway (blank clears), so unchanged rows cost almost
-nothing.
-
-Rows whose SKU is absent from AccountMate are carried through unchanged rather
-than dropped, keeping the mirror 1:1. Retiring them is `deleted-products`' job.
-
-`--changed-only` narrows the file when you want a lighter import.
-
-## Row order and grouping
-
-Matrixify rejects a Handle or ID that reappears after other rows:
-
-```
-Warning: The same ID [...] repeats again after other rows - check the row sorting!
-```
-
-So the output **mirrors the baseline's row order**. The update loop walks the
-Matrixify export rather than the AccountMate file — a SKU can live under more
-than one handle, so driving from AccountMate scattered a product's rows through
-the file. The export already groups handles contiguously, so mirroring its order
-gives correct grouping for free.
-
-Additions in `new-products` are sorted by where their product appears in the
-baseline, keeping each product's new variants together; brand-new products go
-last.
-
-Product-level values are echoed on **every** row of a product, not just the
-first. That satisfies "product fields on the first variant" while avoiding a
-blank cell on the later rows — which would clear the field.
-
-## The baseline must be a Matrixify export
-
-Not a Shopify admin export. The native export has no variant-metafield columns,
-so most fields would have nothing to diff against and would be rewritten every
-run. The script detects this, warns, and lists which columns it could not diff.
-
-## What gets written
-
-Every row carries `Command: MERGE` and `Variant Command: MERGE`, plus `ID` /
-`Variant ID` when the baseline supplies them.
-
-| AccountMate | Matrixify column |
+| Path | Role |
 |---|---|
-| `Regular price` + `Surcharge amount` | `Variant Price` |
-| `Surcharge amount` | `Variant Compare At Price` |
-| `Stock` | `Variant Inventory Qty` |
-| `Weight (lbs)` | `Variant Weight` (+ `Variant Weight Unit: lb`) |
-| `Cost` | `Variant Cost` |
-| `Vendor SKU` | `Variant Metafield: custom.manufacturer_part_number` |
-| `Hazardous` | `Variant Metafield: custom.is_hazmat [boolean]` |
-| `Lead time` | `Variant Metafield: custom.lead_time [number_integer]` |
-| `Length/Width/Height (in)` | `Variant Metafield: custom.{length,width,height} [dimension]` |
-| `Fixed Tiered Prices` | `Variant Metafield: custom.accountmate_tiered_prices` |
+| `sync-matrixify.js` | The sync. Produces the import files. |
+| `sync-config.js` | Every tunable: field map, size vocabulary, categories, handles. |
+| `accountmate.mjs` | Reads AccountMate exports; hides the two file formats. |
+| `spec-parser.mjs` | Normalises, expands and titles specification strings. |
+| `gen-specifications.mjs` | Emits Product Specification metaobjects that don't exist yet. |
+| `gen-content.mjs` | Drafts handles, titles and descriptions for new products. |
+| `new-product-content.csv` | Authored content for new products. **Hand-edited; not disposable.** |
+| `output/color-map.csv` | Persistent SKU → colour code map. |
+| `migration/` | The one-time 2026-08 restructure. Complete; kept for reference. |
+| `archive/` | Superseded scripts. Reference only — they will not run against current config. |
 
-All variant-level: AccountMate carries one value per SKU, and only variant
-metafields can hold a distinct value per variant. The product-level copies of
-MPN, lead time and hazmat are left untouched.
+## Outputs
 
-The abandoned `custom.{length,width,height}_in [number_decimal]` metafields
-(0/14 populated) are ignored in favour of the live `[dimension]` ones.
+| File | What it is |
+|---|---|
+| `updated-products` | Existing products. **Mirrors the baseline row-for-row** so it can be diffed against it. |
+| `new-products` | New products and new sizes of existing ones. |
+| `new-products-BLOCKED` | Rows Shopify would reject, held back with the reason. Nothing is silently dropped. |
+| `deleted-products` | Everything AccountMate has dropped. A worklist, **not an import file**. |
+| `sync-report` | Which fields changed per row, and what needs review. |
 
-### Dimension format
+Import `new-specifications` **first** — the product files reference those handles.
 
-`{"value":9.0,"unit":"INCHES"}`. Compared **numerically**, not as strings — the
-store serialises `9.0` where `JSON.stringify` produces `9`, which would otherwise
-mark every dimension changed on every run.
+---
 
-## The colour map is the one thing you maintain
+## The three rules that shape everything
 
+### 1. A blank cell CLEARS the field
 
-Shopify's `Option1 Value` holds a specific colour code (`17925`, `bac-707`,
-`pantone-281c`). AccountMate's `Color` attribute only has broad names (`WHITE`,
-`GRAY`), so the code has to be recovered from the Short description.
+Matrixify uses a column's value whenever the column is present. A blank cell
+erases the field; it does not mean "leave alone". Two consequences, both
+enforced in code:
 
-The extractor gets **78% coverage at 92% precision** (measured against 62
-variants already live in Shopify). Because precision is not 100% — it once
-returned `bac-7067` where the right answer was `17925` — **an extracted value is
-never written into an import file**. It only ever lands in `color-map.csv` as a
-suggestion.
+* **Only columns the sync understands appear in the output** — ~26 of the
+  export's 110+, so the import cannot touch the rest.
+* **Every column present carries the current value**, read from the baseline,
+  with AccountMate's changes overlaid.
 
-Workflow:
+This applies to product-level columns on variant rows too. A row adding a
+variant must echo back its product's `Title`, `Body HTML`, `Tags`, category and
+metafields, or the import blanks them.
 
-1. Run the sync. New SKUs are appended to `color-map.csv` with a guess, its
-   source (`bac` / `fedstd` / `pantone` / `bare5`), a confidence, and the text
-   snippet the guess came from.
-2. Fill or correct the **`Confirmed Color`** column. That column is the only one
-   the script reads back; everything else is evidence for your review.
-3. Re-run. Confirmed colours flow into `new-products.csv`; unconfirmed ones stay
-   as `NEEDS-COLOR`.
+The exception is `blankPolicy: "overwrite"`, which deliberately writes blanks
+through — currently only the two AccountMate description mirrors.
 
-Confirmations are permanent — a SKU is never re-asked. The map is also seeded
-with every colour already live in Shopify, so those are correct from day one.
+### 2. Rows must form contiguous, ordered product blocks
+
+Matrixify rejects a Handle or ID that reappears after other rows. Output
+therefore mirrors the baseline's row order; the export already groups handles
+contiguously, so this comes free.
+
+### 3. Product-level vs variant-level
+
+A Matrixify export populates product-level fields only on a product's top row.
+They are carried forward for **comparison**, but emitted rows reproduce the
+original verbatim so a re-import never rewrites untouched copy.
+
+---
 
 ## Safety behaviours
 
-These exist because the AccountMate data is known to be unreliable.
+The AccountMate data is known to be inconsistent, so several guards exist.
 
-**Blank never overwrites populated.** A blank (or, for fields like weight, a
-`0.00`) AccountMate value never clears good Shopify data. Skips are logged.
+**Hazmat is direction-protected.** `TRUE → FALSE` is reported and never written;
+`FALSE → TRUE` flows through. A wrong hazmat flag is a shipping-compliance
+problem. The ratchet reads current state from *every* column carrying the fact
+(`custom.hazardous`, `custom.is_hazmat`, the product-level metafield) and
+protects if **any** of them still says true — a single-source check let three
+products through when the metafield type changed.
 
-**Hazmat is direction-protected.** Shopify flags 168/172 variants as hazmat;
-AccountMate would downgrade 13 solvent-based coatings to `FALSE`. Since a wrong
-hazmat flag is a shipping-compliance problem, `TRUE → FALSE` is reported for
-manual review and never written — `FALSE → TRUE` still flows through. Remove the
-`ratchet` line on the hazmat field in `sync-config.js` to disable this.
+**Blank never overwrites populated**, except where `blankPolicy` says otherwise.
 
-**Product-level fields need product-wide agreement.** Everything matching
-`(product.metafields.*)` is a single value per *product*, but AccountMate has a
-value per *SKU*. Where a product's variants disagree — currently 4 products for
-Lead time — nothing is written and the conflict is reported.
+**`newProductsOnly` fields are written once, at creation.** MPN is set this way:
+AccountMate's Vendor part number is too unreliable to re-sync (it has carried
+values like `PAINT` and `JDL-12`). The column is omitted from `updated-products`
+entirely, because merely including it would clear a hand-corrected value.
 
-**Output is byte-faithful to the export.** Product-level values are carried
-forward across variant rows for *comparison only*. Emitted rows reproduce the
-original export row verbatim and overlay just the changed columns, so a
-re-import never rewrites titles, body copy or metafields that didn't change.
+**Unsafe rows are held back, not dropped.** `new-products-BLOCKED` carries a
+`__blockedBecause` column and rejoins the main file once the cause is fixed.
 
-**Allow-list.** Only columns in `UPDATABLE_COLUMNS` are ever written to existing
-products. Titles, body copy, SEO, images and tags stay Shopify's.
+**Size is never guessed.** Unresolved means reported — a wrong size mislabels
+what ships.
 
-## Known data issues this surfaces
+---
 
-- **SKU whitespace.** Both systems carry inconsistent internal spacing
-  (`"AXPG-6-W3  G2"`). Matching normalizes it and reports every SKU that matched
-  only because of normalization — worth fixing at the AccountMate source.
-- **Duplicate SKUs in Shopify.** 68 rows are the same SKU under both a
-  `consolidated` product and an un-retired legacy standalone, all active. Per
-  current config both handles get updated so they stay in sync; the legacy ones
-  are listed in `deleted-products.csv` as retirement candidates.
-- **`6OZ/K` is ambiguous** in the live catalog — mapped to both `4oz Kit` and
-  `6oz Touch-up Kit`. `sync-config.js` picks `6oz Touch-up Kit`.
+## How things are derived
 
-## Configuration
+### Product identity
 
-Everything tunable is in `sync-config.js`:
+One product per colour/chemistry; **Size is the only variant axis**. The product
+is the SKU with its size token stripped:
 
-- `FIELD_MAP` — AccountMate → Shopify field mapping, with per-field `compare`,
-  `transform`, `tolerance`, `scope` and `blankPolicy`. AccountMate attributes are
-  resolved **by name**, not column position, so a reordered export won't
-  silently shift values.
-- `UPDATABLE_COLUMNS` — the write allow-list.
-- `PREFIX_TO_HANDLE` — SKU prefix → existing product handle, for grouping new
-  SKUs as variants. Seeded with 16 rules mined from the live catalog. Longest
-  prefix wins.
-- `UOM_TO_SIZE` / `SKU_SUFFIX_TO_SIZE` — Size (Option2) resolution. Unit of
-  Measure is tried first (55/59 coverage), SKU suffix second.
-- `COLOR_PATTERNS` — the colour extraction regexes.
+```
+HZK31136WPX-T1          ┐
+HZK31136WPX-T1 QT/KT    ├─ one product, three Size variants
+HZK31136WPX-T1 4OZ/K    ┘
+```
 
-### Adding a new product line
+This decides automatically whether a new SKU is a new product or another size of
+an existing one.
 
-When a new SKU family should become variants of one product, add a
-`PREFIX_TO_HANDLE` entry. Until then those SKUs come out as standalone drafts
-(`Status: draft`), which is safe — they won't appear on the storefront.
+### Size
 
-## Note on MPN / Vendor SKU
+AccountMate first: an unambiguous SKU suffix, then Unit of Measure. The mapping
+was **mined from the catalog's own curation**, not guessed — every gallon-ish
+pack is `Gallon`-family, because the kit designation describes the 3/1 mix
+packaging rather than sellable volume. `custom.size` holds the product's
+*distinct* sizes as metaobject references.
 
-AccountMate's **Vendor SKU** maps to **`Google Shopping / MPN`** — the
-variant-level metafield created by the Google channel app. That column is
-currently empty in Shopify (0/172 rows), so the first sync backfills it for
-every matched SKU.
+### Pricing
 
-The product-level `custom.manufacturer_part_number` metafield is deliberately
-**not** synced: it holds one value per product, so on multi-variant products the
-per-SKU Vendor SKUs conflict and nothing can be written safely. It is left
-untouched in Shopify.
+Computed in one place (`computePricing`), never mapped directly:
 
-Two quirks in the source values, left intact because trimming them is a content
-decision rather than a formatting one:
+```
+neither surcharge set   price = AccountMate price,  compare-at CLEARED,      indicator false
+surcharge AMOUNT set    price = price + amount,     compare-at = amount,     indicator true
+surcharge PERCENT set   price = price + price×pct%, compare-at = price×pct%, indicator true
+```
 
-- Many are compound: `"K32202RPX-T2 + CAT 06480CMU"` (part plus catalyst).
-- One is multi-valued: `"PG-6-G1, PG6G1"`.
+Both directions matter: when a surcharge drops to zero the stale compare-at must
+be cleared, or the storefront shows a struck-out price.
 
-Stray internal whitespace *is* collapsed (`"K32236WPX-T2  CAT 06480CMU"` →
-`"K32236WPX-T2 CAT 06480CMU"`).
+### Specifications
 
-## Note on `Variant Price`
+From AccountMate's `QPL` and `Meets specs` columns, then normalised:
 
-Shopify's price is **base price + surcharge**, with the surcharge itself in
-`Variant Compare At Price` and a metafield flagging the convention. Price is
-therefore computed in exactly one place (`computePricing`) rather than mapped
-directly from `Regular price`. Mapping both is what made all 144 matched
-variants look changed on the first draft of this script.
+* variant spellings collapse (`MIL-DLT`→`MIL-DTL`, `O.S.U.`→`OSU`, `BMS10-83`→`BMS 10-83`)
+* abbreviations expand (`TY`→`Type`, `CL`→`Class`)
+* multi-value strings split: `BMS 10-60, Type I & II, Class B` becomes two specs
+  (also handles `/` and `and`, and a repeated keyword)
+* titles get canonical punctuation so `MIL-PRF-85285, Type I, Class H` and
+  `MIL-PRF-85285 Type I Class H` don't become two metaobjects
+* `base_specification` strips the revision (`MIL-PRF-85285E` → `MIL-PRF-85285`)
+  and is **blank when it equals the title**
+
+### Tags
+
+Metafields are not indexed by Shopify search; tags are. Four sources merge into
+whatever the product already carries:
+
+```
+spec bases    mil-prf-85285, bms-10-60
+series        pg-6
+colour codes  37038, bac-707        (from Color specs, not the unused Color field)
+NSN           8010-01-582-7282
+```
+
+---
+
+## Known data issues
+
+* **The export is malformed CSV.** Every row wraps `Tier price` in doubled
+  quotes, which standard parsers reject. Repaired in `accountmate.mjs`; should be
+  fixed at source.
+* **Entities are triple-encoded** (`&amp;amp;`). Decoding loops until stable.
+  Because `&amp;` contains a semicolon, a single pass silently split
+  qualifications in half.
+* **AccountMate's `Color` field is unused** — 13 broad names that cannot resolve
+  to a colour handle. `Color specs` carries the code.
+* **SKU whitespace is inconsistent** in both systems. Matching normalises it and
+  reports every SKU that matched only because of normalisation.
+* **Some specs have no governing body** (`EPS G37.341`, `Q2179`) and are left
+  blank rather than guessed.
+* **One NSN is malformed** — `8010-582-7301` is missing a segment versus the
+  standard 4-2-3-4 form.
+
+## Making changes
+
+Nearly everything is in `sync-config.js`:
+
+* `MATRIXIFY_FIELD_MAP` — AccountMate → Shopify, with per-field `compare`,
+  `transform`, `tolerance`, `scope`, `blankPolicy`, `ratchet`, `newProductsOnly`
+* `UOM_TO_SIZE` / `SKU_SUFFIX_SIZE_OVERRIDE` / `SIZE_VOCABULARY` / `SIZE_METAOBJECT`
+* `PRODUCT_CATEGORY` / `PARENT_COLLECTION` / `PRODUCT_TYPE` — category is
+  **required**: `custom.size` is a category metafield and is rejected without one
+* `NEW_PRODUCT_HANDLE` — `hentzen-{mpn}-{spec}`; applied to new products only,
+  because renaming an existing handle costs its SEO ranking
+
+**When adding a column, three places need it**: the field map, the output header,
+and `managedColumns` (which carries current values). Missing the header means the
+value is computed and then silently stripped at write time — this has caused
+several bugs.
+
+**When a source format changes**, only `accountmate.mjs` should need editing —
+everything else asks for canonical field names and is format-agnostic.
+
+**Verify against the written file, not in-memory rows.** Several bugs here were
+only visible after the CSV was on disk.

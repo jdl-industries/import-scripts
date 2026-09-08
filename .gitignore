@@ -1,5 +1,9 @@
 node_modules/
 dist/
 .env
-*.csv
 *.log
+
+# Exports and generated files are not tracked: they are large, frequently
+# regenerated, and reproducible from the source systems.
+*.csv
+output/

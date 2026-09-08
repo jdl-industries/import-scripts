@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { parse } from "csv-parse/sync";
-import { SIZE_METAOBJECT, SIZE_RENAMES, SIZE_VOCABULARY } from "./sync-config.js";
+import { SIZE_METAOBJECT, SIZE_RENAMES, SIZE_VOCABULARY } from "../sync-config.js";
 
 const P=(f)=>parse(fs.readFileSync(f),{columns:true,skip_empty_lines:true,relax_column_count:true,bom:true});
 const esc=(v)=>{if(v==null)return"";const s=String(v);return /[",\n\r]/.test(s)?`"${s.replace(/"/g,'""')}"`:s;};

@@ -52,6 +52,7 @@ import {
   CATEGORY_COLUMNS,
   classifyCategory,
   PRODUCT_TYPE,
+  manufacturerInfo,
 } from "./sync-config.js";
 
 // ===========================================================================
@@ -542,8 +543,33 @@ function resolveSize(sku, amRow) {
   return { value: "", source: "" };
 }
 
-/** hentzen-{mpn}-{spec}, per the agreed scheme. */
+const slug = (v) =>
+  String(v)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+/**
+ * {manufacturer-prefix}-{mpn}[-{spec}], per the agreed scheme -- e.g.
+ * hentzen-31104kpx-t1-mil-prf-85285f-type-i, henkel-loctite-ea-934na.
+ *
+ * The Hentzen-specific pieces (HZ/HZK stripping, AX normalisation, the
+ * MIL-spec suffix) are Hentzen SKU/description conventions, not universal
+ * ones, so only Hentzen (and any manufacturer with no MANUFACTURERS entry)
+ * gets them. Other manufacturers use their own partNumberFrom() when the raw
+ * SKU doesn't carry the real part number (e.g. AccountMate's "HS-EA934" vs.
+ * Loctite's actual "EA 934NA"), else fall back to the SKU base.
+ */
 function buildHandle(amRow, sku) {
+  const info = manufacturerInfo(getField(amRow, "manufacturer"));
+  const isHentzen = !info || info.handlePrefix === "hentzen";
+
+  if (!isHentzen) {
+    const prefix = info.handlePrefix || slug(getField(amRow, "manufacturer"));
+    const mpn = info.partNumberFrom?.(getField(amRow, "shortDescription")) || skuBase(sku);
+    return [prefix, slug(mpn)].filter(Boolean).join("-");
+  }
+
   // Prefer the AccountMate Vendor SKU, falling back to the SKU base. Strip any
   // trailing size token -- "PG-21-G2 Q2" would otherwise put a size in the URL,
   // which is wrong now that size is a variant.
@@ -551,11 +577,6 @@ function buildHandle(amRow, sku) {
   // real errors ("PAINT", "JDL-12", and AXTF-1-BR1 listed as AXTS-1-BR1).
   // The SKU is the client's canonical identifier.
   let mpn = NEW_PRODUCT_HANDLE.normalizeMpn(skuBase(sku));
-  const slug = (v) =>
-    String(v)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "");
   const spec = NEW_PRODUCT_HANDLE.specFrom(amRow);
   return [NEW_PRODUCT_HANDLE.prefix, slug(mpn), spec ? slug(spec) : ""].filter(Boolean).join("-");
 }
@@ -1075,7 +1096,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
         row["Body HTML"] = groupContent?.body || getField(amRow, "description") || "";
         row["Status"] = NEW_PRODUCT_DEFAULTS.Status;
         row["Published"] = NEW_PRODUCT_DEFAULTS.Published;
-        row["Vendor"] = getField(amRow, "manufacturer") || NEW_PRODUCT_DEFAULTS.Vendor;
+        const mfgInfo = manufacturerInfo(getField(amRow, "manufacturer"));
+        row["Vendor"] = mfgInfo?.vendor || getField(amRow, "manufacturer") || NEW_PRODUCT_DEFAULTS.Vendor;
         row["Variant Taxable"] = "true";
         row["Variant Inventory Tracker"] = "shopify";
         row["Variant Inventory Policy"] = "deny";
@@ -1085,7 +1107,12 @@ variant-metafield columns, so most fields would have nothing to diff against.
         // rejected outright on a product with no category.
         Object.assign(row, specMetafields(amRow));
 
-        const kind = classifyCategory(groupContent?.description, groupContent?.spec);
+        // Non-Hentzen manufacturers classify from their own description text,
+        // not the (Hentzen-only) authored content map, and aren't coatings so
+        // classifyCategory()'s primer/topcoat/carc split doesn't apply to them.
+        const kind = mfgInfo?.classify
+          ? mfgInfo.classify(getField(amRow, "shortDescription"))
+          : classifyCategory(groupContent?.description, groupContent?.spec);
         Object.assign(row, PRODUCT_CATEGORY[kind]);
         row["Type"] = PRODUCT_TYPE[kind];
 

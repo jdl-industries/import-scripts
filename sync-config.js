@@ -62,13 +62,23 @@ export const UOM_TO_SIZE = {
   "1-GL KIT": "1 Gallon Kit",
   GALKIT: "1 Gallon Kit",
   "2-GL KIT": "2 Gallon Kit",
+  "4-GL KIT": "4 Gallon Kit",
   QRTKT: "Quart",
   QRT: "Quart",
   "2-OZ KIT": "2oz Kit",
+  RL: "Roll",
+  LB: "Pound",
+
   // "4-GL KIT" is deliberately absent: there is no "4 Gallon Kit" in the
   // enumeration. 1 SKU (AXPG-6-B487 G4) hits this and is reported, not guessed.
   //
   // "EA" and "KIT" are too coarse to map; both are resolved from the SKU suffix.
+
+  // Non-Hentzen manufacturers (2026-09-28 multi-vendor catalog). Fallbacks only --
+  // the matching SKU-suffix override below resolves these SKUs first.
+  "6-OZ KIT": "6oz Kit",
+  PTKT: "Pint",
+  "20-COUNT": "20 Count",
 };
 
 // SKU-suffix overrides, applied BEFORE the UoM map. Only tokens that
@@ -89,12 +99,17 @@ export const SKU_SUFFIX_SIZE_OVERRIDE = {
   "QT/KT": "Quart",
   Q2: "Quart",
   QT: "Quart",
+
+  // Non-Hentzen manufacturers (2026-09-28 multi-vendor catalog).
+  "CAN 1-LB": "1 LB Can", // Penreco VV-P-236
+  "1PT": "Pint", // Flamemaster CS-3204/CS-3213 pint kits
+  "6OZ": "6oz Kit", // Flamemaster CS-3204/CS-3213 6oz kits
 };
 
 // Longest-first, so "K-1/4 GL" wins over "GL".
-export const SKU_SUFFIX_OVERRIDE_ORDER = Object.keys(SKU_SUFFIX_SIZE_OVERRIDE).sort(
-  (a, b) => b.length - a.length,
-);
+export const SKU_SUFFIX_OVERRIDE_ORDER = Object.keys(
+  SKU_SUFFIX_SIZE_OVERRIDE,
+).sort((a, b) => b.length - a.length);
 
 // The complete Size vocabulary in use. Anything outside this set is a new
 // option value and needs a deliberate decision, so the migration flags it.
@@ -109,6 +124,12 @@ export const SIZE_VOCABULARY = [
   "2oz Kit",
   "4oz Kit",
   "6oz Kit",
+
+  // Non-Hentzen manufacturers (2026-09-28 multi-vendor catalog).
+  "Roll",
+  "Pint",
+  "1 LB Can",
+  "20 Count",
 ];
 // ---------------------------------------------------------------------------
 // Colour extraction (Option1)
@@ -121,9 +142,21 @@ export const SIZE_VOCABULARY = [
 // Extraction NEVER writes straight into an import file -- results land in
 // color-map.csv for human confirmation first.
 export const COLOR_PATTERNS = [
-  { name: "pantone", re: /PANTONE\s*#?\s*([0-9]+\s*[A-Z]?)\b/i, format: (m) => "pantone-" + m[1].replace(/\s+/g, "").toLowerCase() },
-  { name: "bac", re: /\bBAC\s*#?\s*([0-9]{3,6})\b/i, format: (m) => "bac-" + m[1] },
-  { name: "fedstd", re: /\bF(?:STD|SD|ED)\.?\s*(?:STD)?\.?\s*#?\s*([0-9]{5})\b/i, format: (m) => m[1] },
+  {
+    name: "pantone",
+    re: /PANTONE\s*#?\s*([0-9]+\s*[A-Z]?)\b/i,
+    format: (m) => "pantone-" + m[1].replace(/\s+/g, "").toLowerCase(),
+  },
+  {
+    name: "bac",
+    re: /\bBAC\s*#?\s*([0-9]{3,6})\b/i,
+    format: (m) => "bac-" + m[1],
+  },
+  {
+    name: "fedstd",
+    re: /\bF(?:STD|SD|ED)\.?\s*(?:STD)?\.?\s*#?\s*([0-9]{5})\b/i,
+    format: (m) => m[1],
+  },
   { name: "bare5", re: /(?<![0-9-])([0-9]{5})(?![0-9-])/, format: (m) => m[1] },
 ];
 
@@ -141,7 +174,6 @@ export const COLOR_MAP_FILE = "color-map.csv";
 // Output
 // ---------------------------------------------------------------------------
 export const NEEDS_COLOR_PLACEHOLDER = "NEEDS-COLOR";
-
 
 // Defaults applied to brand-new standalone products.
 export const NEW_PRODUCT_DEFAULTS = {
@@ -214,7 +246,12 @@ export const MATRIXIFY_FIELD_MAP = [
     treatZeroAsBlank: true,
     companions: { "Variant Weight Unit": "lb" },
   },
-  { source: { field: "cost" }, col: "Variant Cost", compare: "number", treatZeroAsBlank: true },
+  {
+    source: { field: "cost" },
+    col: "Variant Cost",
+    compare: "number",
+    treatZeroAsBlank: true,
+  },
   {
     source: { field: "vendorPartNumber" },
     // The Google channel's variant-level MPN metafield.
@@ -242,7 +279,8 @@ export const MATRIXIFY_FIELD_MAP = [
     col: "Variant Metafield: custom.hazardous [boolean]",
     compare: "string",
     // Metafield type was changed to boolean, so emit true/false, not Yes/No.
-    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+    transform: (v) =>
+      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
     ratchet: { protect: "true" },
     // The metafield type was changed to boolean, which left the new column empty
     // (0/172) while the old values still sit in the text metafield and the
@@ -298,7 +336,8 @@ export const MATRIXIFY_FIELD_MAP = [
     source: { field: "hazardous" },
     col: "Variant Metafield: custom.is_hazmat [boolean]",
     compare: "string",
-    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+    transform: (v) =>
+      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
     ratchet: { protect: "true" },
     currentFrom: [
       "Variant Metafield: custom.hazardous [boolean]",
@@ -315,13 +354,15 @@ export const MATRIXIFY_FIELD_MAP = [
     source: { field: "needsDryIce" },
     col: "Variant Metafield: custom.ships_frozen [boolean]",
     compare: "string",
-    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+    transform: (v) =>
+      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
   },
   {
     source: { field: "needsSpecialPkg" },
     col: "Variant Metafield: custom.special_packaging [boolean]",
     compare: "string",
-    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+    transform: (v) =>
+      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
   },
   {
     // AccountMate's own copy, mirrored VERBATIM -- no decoding, no reflowing.
@@ -359,7 +400,10 @@ export const MATRIXIFY_FIELD_MAP = [
     col: "Variant Metafield: custom.accountmate_tiered_prices [single_line_text_field]",
     compare: "string",
     // The export wraps this field in stray doubled quotes -- see accountmate.mjs.
-    transform: (v) => String(v).replace(/^"+|"+$/g, "").trim(),
+    transform: (v) =>
+      String(v)
+        .replace(/^"+|"+$/g, "")
+        .trim(),
   },
 ];
 
@@ -388,7 +432,8 @@ export const MIGRATION = {
   // Products the migration must not touch.
   excludeHandles: ["test"],
 
-  colourPatternCol: "Metafield: shopify.color-pattern [list.metaobject_reference]",
+  colourPatternCol:
+    "Metafield: shopify.color-pattern [list.metaobject_reference]",
   saeColourCol: "Metafield: custom.sae_color [single_line_text_field]",
   colourNamespace: "shopify--color-pattern",
 
@@ -428,6 +473,17 @@ export const SIZE_METAOBJECT = {
   "2oz Kit": "liquid_product_size.2-oz-kit",
   "4oz Kit": "liquid_product_size.4-oz-kit",
   "6oz Kit": "liquid_product_size.6-oz-kit",
+
+  // Non-Hentzen manufacturers (2026-09-28 multi-vendor catalog).
+  Roll: "liquid_product_size.roll", // confirmed live in Shopify
+  Pint: "liquid_product_size.pint",
+  Pound: "liquid_product_size.pound",
+  "20-count": "liquid_product_size.20-count",
+  // "Pint" and "1 LB Can" are NOT here yet: no metaobject entry exists for
+  // either. Until one is added in Shopify (Content > Metaobjects > Liquid
+  // Product Size), Flamemaster/Penreco new products still get a resolved
+  // Option1 Value (so they are no longer blocked), but custom.size is left
+  // unset on them rather than emit a dangling reference.
 };
 
 // Display values in the catalog that are NOT in the enumeration and must be
@@ -437,7 +493,8 @@ export const SIZE_RENAMES = {
   "6oz Touch-up Kit": "6oz Kit",
 };
 
-export const SIZE_METAFIELD_COL = "Metafield: custom.size [list.metaobject_reference]";
+export const SIZE_METAFIELD_COL =
+  "Metafield: custom.size [list.metaobject_reference]";
 
 // ---------------------------------------------------------------------------
 // New-product handles
@@ -454,7 +511,9 @@ export const NEW_PRODUCT_HANDLE = {
   //   AX + LETTER ("AXEP-3", "AXPG-6", "AXTS-1")  a client data-entry error,
   //                                               stripped.
   normalizeMpn(v) {
-    let raw = String(v || "").replace(/\s*\+.*$/, "").trim();
+    let raw = String(v || "")
+      .replace(/\s*\+.*$/, "")
+      .trim();
 
     // "HZ" / "HZK" is the client's internal SKU prefix, never part of the
     // manufacturer part number. Existing titles read "Hentzen 22167WEP", not
@@ -481,7 +540,9 @@ export const NEW_PRODUCT_HANDLE = {
     const m = txt.match(this.specPattern);
     // Normalise spacing before slugging: the source writes both "BMS 10-83" and
     // "BMS10-83".
-    return m ? m[1].replace(/^([A-Z]+)(\d)/i, "$1 $2").replace(/\s+/g, "-") : "";
+    return m
+      ? m[1].replace(/^([A-Z]+)(\d)/i, "$1 $2").replace(/\s+/g, "-")
+      : "";
   },
 };
 
@@ -496,7 +557,8 @@ export const PRODUCT_CATEGORY = {
   primer: {
     "Category: ID": "ha-1-6-3",
     "Category: Name": "Primers",
-    Category: "Hardware > Building Consumables > Painting Consumables > Primers",
+    Category:
+      "Hardware > Building Consumables > Painting Consumables > Primers",
   },
   topcoat: {
     "Category: ID": "ha-1-6-1",
@@ -506,7 +568,46 @@ export const PRODUCT_CATEGORY = {
   carc: {
     "Category: ID": "ha-1-8-2",
     "Category: Name": "Protective Coatings",
-    Category: "Hardware > Building Consumables > Protective Coatings & Sealants > Protective Coatings",
+    Category:
+      "Hardware > Building Consumables > Protective Coatings & Sealants > Protective Coatings",
+  },
+
+  // Non-Hentzen manufacturers (2026-09-28 multi-vendor catalog). Verified
+  // against Shopify's live Standard Product Taxonomy on 2026-09-28.
+  adhesive: {
+    "Category: ID": "ha-1-2",
+    "Category: Name": "Hardware Glue & Adhesives",
+    Category: "Hardware > Building Consumables > Hardware Glue & Adhesives",
+  },
+  tape: {
+    "Category: ID": "ha-1-3",
+    "Category: Name": "Hardware Tape",
+    Category: "Hardware > Building Consumables > Hardware Tape",
+  },
+  tapeMasking: {
+    "Category: ID": "ha-1-3-3",
+    "Category: Name": "Masking Tape",
+    Category: "Hardware > Building Consumables > Hardware Tape > Masking Tape",
+  },
+  // No aerospace-sealant leaf exists in Shopify's taxonomy (the Protective
+  // Coatings & Sealants leaves are all construction-grade: roofing, concrete,
+  // waterproofing), so this deliberately sits one level up at the parent.
+  sealant: {
+    "Category: ID": "ha-1-8",
+    "Category: Name": "Protective Coatings & Sealants",
+    Category:
+      "Hardware > Building Consumables > Protective Coatings & Sealants",
+  },
+  grease: {
+    "Category: ID": "ha-1-4-2",
+    "Category: Name": "Grease",
+    Category: "Hardware > Building Consumables > Lubricants > Grease",
+  },
+  abrasive: {
+    "Category: ID": "ha-14-19-1-6",
+    "Category: Name": "Sanding Pads",
+    Category:
+      "Hardware > Tool Accessories > Sanding Accessories > Sandpaper & Sanding Sponges > Sanding Pads",
   },
 };
 
@@ -531,24 +632,57 @@ export function classifyCategory(description, spec) {
 // are all unambiguous. Anything else is reported for a human decision rather
 // than guessed -- see UNMAPPABLE below for the cases this currently refuses.
 export const MIL_SPEC_PATTERNS = [
-  [/MIL-PRF-85285.*\bTY(?:PE)?\s*(?:I\b|1\b)(?!I|V).*CL(?:ASS)?\s*H/i, "mil-prf-85285-type-i-class-h"],
-  [/MIL-PRF-85285.*\bTY(?:PE)?\s*(?:II|2)\b(?!I).*CL(?:ASS)?\s*H/i, "mil-prf-85285-type-ii-class-h"],
+  [
+    /MIL-PRF-85285.*\bTY(?:PE)?\s*(?:I\b|1\b)(?!I|V).*CL(?:ASS)?\s*H/i,
+    "mil-prf-85285-type-i-class-h",
+  ],
+  [
+    /MIL-PRF-85285.*\bTY(?:PE)?\s*(?:II|2)\b(?!I).*CL(?:ASS)?\s*H/i,
+    "mil-prf-85285-type-ii-class-h",
+  ],
   [/MIL-PRF-85285.*\bTY(?:PE)?\s*(?:IV|4)\b/i, "mil-prf-85285-type-iv-class-h"],
   [/MIL-PRF-85285,?\s*TYPE\s*I,\s*CLASS\s*H/i, "mil-prf-85285-type-i-class-h"],
-  [/MIL-DTL-53022.*\bTY(?:PE)?\s*IV.*\bCL(?:S|ASS)?\s*U/i, "mil-dtl-53022-type-iv-class-u"],
-  [/MIL-DTL-53022.*\bTY(?:PE)?\s*IV.*\bCL(?:S|ASS)?\s*L/i, "mil-dtl-53022-type-iv-class-l"],
+  [
+    /MIL-DTL-53022.*\bTY(?:PE)?\s*IV.*\bCL(?:S|ASS)?\s*U/i,
+    "mil-dtl-53022-type-iv-class-u",
+  ],
+  [
+    /MIL-DTL-53022.*\bTY(?:PE)?\s*IV.*\bCL(?:S|ASS)?\s*L/i,
+    "mil-dtl-53022-type-iv-class-l",
+  ],
   [/MIL-DTL-53030.*\bTY(?:PE)?\s*II\b/i, "mil-dtl-53030-type-ii"],
   [/MIL-DTL-53039.*\bTY(?:PE)?\s*IX\b/i, "mil-dtl-53039-type-ix"],
   [/MIL-DTL-53039.*\bTY(?:PE)?\s*IV\b/i, "mil-dtl-53039-type-iv"],
   [/MIL-C-8514\b/i, "mil-c-8514"],
   [/MIL-PRF-81352.*\bTY(?:PE)?\s*I\b(?!I|V)/i, "mil-prf-81352-type-i"],
-  [/MIL-PRF-23377.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*C2/i, "mil-prf-23377-type-ii-class-c2"],
-  [/MIL-PRF-23377.*\bTY(?:PE)?\s*I\b(?!I|V).*\bCL(?:ASS)?\s*C2/i, "mil-prf-23377-type-i-class-c2"],
-  [/MIL-PRF-23377.*\bTY(?:PE)?\s*I\b(?!I|V).*\bCL(?:ASS)?\s*C1/i, "mil-prf-23377-type-i-class-c1"],
-  [/MIL-PRF-23377.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*N/i, "mil-prf-23377-type-ii-class-n"],
-  [/MIL-PRF-85582.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*C-?2/i, "mil-prf-85582-type-ii-class-c2"],
-  [/MIL-PRF-85582.*\bTY(?:PE)?\s*I\b(?!I|V).*\bCL(?:ASS)?\s*C-?2/i, "mil-prf-85582-type-i-class-c2"],
-  [/MIL-PRF-22750.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*H/i, "mil-prf-22750-type-ii-class-h-grade-a"],
+  [
+    /MIL-PRF-23377.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*C2/i,
+    "mil-prf-23377-type-ii-class-c2",
+  ],
+  [
+    /MIL-PRF-23377.*\bTY(?:PE)?\s*I\b(?!I|V).*\bCL(?:ASS)?\s*C2/i,
+    "mil-prf-23377-type-i-class-c2",
+  ],
+  [
+    /MIL-PRF-23377.*\bTY(?:PE)?\s*I\b(?!I|V).*\bCL(?:ASS)?\s*C1/i,
+    "mil-prf-23377-type-i-class-c1",
+  ],
+  [
+    /MIL-PRF-23377.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*N/i,
+    "mil-prf-23377-type-ii-class-n",
+  ],
+  [
+    /MIL-PRF-85582.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*C-?2/i,
+    "mil-prf-85582-type-ii-class-c2",
+  ],
+  [
+    /MIL-PRF-85582.*\bTY(?:PE)?\s*I\b(?!I|V).*\bCL(?:ASS)?\s*C-?2/i,
+    "mil-prf-85582-type-i-class-c2",
+  ],
+  [
+    /MIL-PRF-22750.*\bTY(?:PE)?\s*II\b(?!I).*\bCL(?:ASS)?\s*H/i,
+    "mil-prf-22750-type-ii-class-h-grade-a",
+  ],
 ];
 
 // Strings that name a MIL spec but cannot be resolved to one of the 17 handles.
@@ -556,7 +690,11 @@ export const MIL_SPEC_PATTERNS = [
 //   MIL-C-85285          superseded designation, no type/class given
 //   MIL-C-83286          no metaobject exists
 //   MIL-PRF-22750        no type/class given; "TYPE I" has no metaobject
-export const MIL_SPEC_UNMAPPABLE = [/MIL-C-85285/i, /MIL-C-83286/i, /MIL-PRF-22750(?!.*TY)/i];
+export const MIL_SPEC_UNMAPPABLE = [
+  /MIL-C-85285/i,
+  /MIL-C-83286/i,
+  /MIL-PRF-22750(?!.*TY)/i,
+];
 
 export const PARENT_COLLECTION = {
   primer: "aviation-primers",
@@ -571,11 +709,93 @@ export const APPLICATION_FIELDS = [
 ];
 
 // Shopify "Type", per category. Title-case, matching the 3 values in use.
-export const PRODUCT_TYPE = { primer: "Primer", topcoat: "Topcoat", carc: "CARC" };
+export const PRODUCT_TYPE = {
+  primer: "Primer",
+  topcoat: "Topcoat",
+  carc: "CARC",
+  adhesive: "Adhesive",
+  tape: "Tape",
+  tapeMasking: "Masking Tape",
+  sealant: "Sealant",
+  grease: "Grease",
+  abrasive: "Abrasive Pad",
+};
+
+// ---------------------------------------------------------------------------
+// Non-Hentzen manufacturers
+// ---------------------------------------------------------------------------
+// The catalog's first multi-vendor import (2026-09-28): AccountMate's
+// "Manufacturer" field now carries 3M, Flamemaster, Henkel and Penreco
+// alongside Hentzen. Each needs its own Vendor display name, its own handle
+// prefix (the old buildHandle() hardcoded "hentzen" for every new product --
+// wrong once other brands showed up), and its own category, since none of
+// them are coatings and classifyCategory() only knows primer/topcoat/carc.
+//
+// Keyed by the raw AccountMate "Manufacturer" value, upper-cased. A
+// manufacturer with no entry here falls back to a slugified version of its
+// own name for both vendor and handle prefix, and to classifyCategory() (the
+// Hentzen coatings classifier) for category -- which is very likely wrong for
+// a genuinely new manufacturer, so treat that fallback as a signal to add a
+// real entry here, not as a feature.
+export const MANUFACTURERS = {
+  HENTZEN: {
+    vendor: "Hentzen",
+    handlePrefix: "hentzen",
+  },
+  "3M": {
+    vendor: "3M",
+    handlePrefix: "3m",
+    // Scotch-Brite hand pads and foil/glass-cloth tape aren't masking tape;
+    // only flag the ones that actually say so.
+    classify(description) {
+      const t = (description || "").toLowerCase();
+      if (/scotch-?brite|hand pad/.test(t)) return "abrasive";
+      if (/masking tape/.test(t)) return "tapeMasking";
+      return "tape";
+    },
+  },
+  FLAMEMASTER: {
+    vendor: "Flamemaster",
+    handlePrefix: "flamemaster",
+    classify: () => "sealant",
+  },
+  // AccountMate has reported this manufacturer as both "HENKEL" and
+  // "HENKEL-AER" across exports -- both map to the same brand.
+  HENKEL: {
+    vendor: "Henkel",
+    handlePrefix: "henkel-loctite",
+    classify: () => "adhesive",
+    // AccountMate's SKU ("HS-EA934") drops the real Loctite part number's
+    // suffix ("EA 934NA"). The description always carries the true one.
+    partNumberFrom(description) {
+      const m = String(description || "").match(/\bEA\s*(\d+[A-Z]*)\b/i);
+      return m ? `EA ${m[1]}` : "";
+    },
+  },
+  PENRECO: {
+    vendor: "Penreco",
+    handlePrefix: "penreco",
+    classify: () => "grease",
+  },
+};
+MANUFACTURERS["HENKEL-AER"] = MANUFACTURERS.HENKEL;
+
+/** Manufacturer config for a raw AccountMate "Manufacturer" value, or null. */
+export function manufacturerInfo(raw) {
+  return (
+    MANUFACTURERS[
+      String(raw || "")
+        .trim()
+        .toUpperCase()
+    ] || null
+  );
+}
 
 /**
  * Tag form of a mil-spec handle: the base spec without type/class, which is how
  * the catalog tags them ("mil-prf-85285", not the full handle).
  */
 export const milSpecTag = (handle) =>
-  String(handle).replace(/^military_specification\./, "").replace(/-type-.*$/, "");
+  String(handle)
+    .replace(/^military_specification\./, "")
+    .replace(/-type-.*$/, "");

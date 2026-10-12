@@ -78,7 +78,10 @@ export const UOM_TO_SIZE = {
   // the matching SKU-suffix override below resolves these SKUs first.
   "6-OZ KIT": "6oz Kit",
   PTKT: "Pint",
-  "20-COUNT": "20 Count",
+  // Matches the "Box (20 Count)" metaobject's actual display name, not just
+  // the count -- the resolved value here is also the SIZE_METAOBJECT lookup
+  // key, so the two must agree verbatim.
+  "20-COUNT": "Box (20 Count)",
 };
 
 // SKU-suffix overrides, applied BEFORE the UoM map. Only tokens that
@@ -129,7 +132,10 @@ export const SIZE_VOCABULARY = [
   "Roll",
   "Pint",
   "1 LB Can",
-  "20 Count",
+  "Box (20 Count)",
+  "1 Inch",
+  "1.5 Inch",
+  "2 Inch",
 ];
 // ---------------------------------------------------------------------------
 // Colour extraction (Option1)
@@ -381,6 +387,17 @@ export const MATRIXIFY_FIELD_MAP = [
     blankPolicy: "overwrite",
   },
   {
+    // AccountMate's own category code ("PAINTS > MIL-TOPCOAT", "ADHESIVES >
+    // PASTE"), mirrored VERBATIM -- no normalising, no mapping. This is the
+    // same raw source typeFromAccountMateCategory() (below) reads to drive
+    // the Type field; this metafield is just a pass-through copy of it, same
+    // treatment as accountmate_description/accountmate_short_description.
+    source: { field: "categories" },
+    col: "Variant Metafield: custom.accountmate_category [single_line_text_field]",
+    compare: "string",
+    blankPolicy: "overwrite",
+  },
+  {
     // Product family / series, e.g. "PG-6".
     source: { field: "series" },
     col: "Metafield: custom.series [single_line_text_field]",
@@ -474,16 +491,19 @@ export const SIZE_METAOBJECT = {
   "4oz Kit": "liquid_product_size.4-oz-kit",
   "6oz Kit": "liquid_product_size.6-oz-kit",
 
-  // Non-Hentzen manufacturers (2026-09-28 multi-vendor catalog).
-  Roll: "liquid_product_size.roll", // confirmed live in Shopify
+  // Non-Hentzen manufacturers (2026-09-28 multi-vendor catalog). All
+  // confirmed live, 2026-10-01.
+  Roll: "liquid_product_size.roll",
   Pint: "liquid_product_size.pint",
-  Pound: "liquid_product_size.pound",
-  "20-count": "liquid_product_size.20-count",
-  // "Pint" and "1 LB Can" are NOT here yet: no metaobject entry exists for
-  // either. Until one is added in Shopify (Content > Metaobjects > Liquid
-  // Product Size), Flamemaster/Penreco new products still get a resolved
-  // Option1 Value (so they are no longer blocked), but custom.size is left
-  // unset on them rather than emit a dangling reference.
+  "Box (20 Count)": "liquid_product_size.20-count",
+  "1 Inch": "liquid_product_size.1-inch",
+  "1.5 Inch": "liquid_product_size.1-5-inch",
+  "2 Inch": "liquid_product_size.2-inch",
+  // "Pound" exists in Shopify but nothing resolves to a "Pound" size value --
+  // the live Penreco product uses "1 LB Can" instead, whose metaobject
+  // doesn't exist yet. Until it's added, Penreco's custom.size is left unset
+  // rather than emit a dangling reference (Option1 Value still resolves, so
+  // it is not blocked).
 };
 
 // Display values in the catalog that are NOT in the enumeration and must be
@@ -722,6 +742,51 @@ export const PRODUCT_TYPE = {
 };
 
 // ---------------------------------------------------------------------------
+// AccountMate "Categories" -> Shopify Type
+// ---------------------------------------------------------------------------
+// AccountMate's own "Categories" column ("ADHESIVES > PASTE", "PAINTS >
+// MIL-TOPCOAT", ...) is a more specific, manufacturer-agnostic Type source
+// than classify()/classifyCategory() above, which only guess from free-text
+// description keywords. Used for NEW products only, same as PRODUCT_TYPE --
+// existing products' Type is left alone (carried through PRODUCT_LEVEL_CARRY)
+// rather than silently overwritten on every sync.
+//
+// Case-insensitive; "SEALANT > SEAL-POLY" (singular, as AccountMate actually
+// emits it) is tolerated alongside the plural "SEALANTS > SEAL-POLY" below.
+// A Categories value with no entry here (e.g. "PAINTS > COM-TOUCH UP KITS",
+// which AccountMate is expected to stop emitting) falls back to
+// PRODUCT_TYPE[kind] via typeFromAccountMateCategory() returning null.
+const ACCOUNTMATE_CATEGORY_TO_TYPE = {
+  "ABRASIVES > PADS": "Abrasive Pad",
+  "ADHESIVES > PASTE": "Adhesive Paste",
+  CHEMICALS: "Other Chemical",
+  LUBRICANTS: "Lubricant",
+  "SEALANTS > SEAL-POLY": "Sealant",
+  "SEALANTS > FUEL TANK": "Sealant",
+  "TAPES > ACRYLIC": "Acrylic Tape",
+  "TAPES > ALUMINUM": "Aluminum Tape",
+  "TAPES > MASKING": "Masking Tape",
+  "TAPES > POLYESTER": "Polyester Tape",
+  "TAPES > VINYL": "Vinyl Tape",
+  "PAINTS > EXTERIOR": "Exterior Paint",
+  "PAINTS > INTERIOR": "Interior Paint",
+  "PAINTS > PRIMER": "Primer",
+  "PAINTS > REFLECTIVE": "Reflective Paint",
+  "PAINTS > THINNER": "Thinner",
+  "PAINTS > MIL-CARC": "CARC",
+  "PAINTS > MIL-PRIMERS": "Military Primer", // "Miliary" in the source spec -- treated as a typo
+  "PAINTS > MIL-TOPCOAT": "Military Topcoat",
+};
+
+export function typeFromAccountMateCategory(raw) {
+  const v = String(raw || "")
+    .trim()
+    .toUpperCase()
+    .replace(/^SEALANT\b/, "SEALANTS");
+  return ACCOUNTMATE_CATEGORY_TO_TYPE[v] || null;
+}
+
+// ---------------------------------------------------------------------------
 // Non-Hentzen manufacturers
 // ---------------------------------------------------------------------------
 // The catalog's first multi-vendor import (2026-09-28): AccountMate's
@@ -752,6 +817,30 @@ export const MANUFACTURERS = {
       if (/scotch-?brite|hand pad/.test(t)) return "abrasive";
       if (/masking tape/.test(t)) return "tapeMasking";
       return "tape";
+    },
+    // 3M SKUs encode width as a trailing "-N" or "-N M/M" mixed fraction with
+    // no space ("232-11/2" = 1 1/2 in). Confirmed live in Shopify: "3M 232" is
+    // one product with 1/1.5/2 Inch variants, not three separate products or
+    // Hentzen-style Quart/Gallon pack sizes.
+    widthInches(sku) {
+      const m = String(sku || "")
+        .trim()
+        .match(/-(\d+)(?:(\d)\/(\d))?\s*$/);
+      if (!m) return null;
+      const n = Number(m[1]) + (m[2] && m[3] ? Number(m[2]) / Number(m[3]) : 0);
+      return Number.isFinite(n) ? n : null;
+    },
+    groupKey(sku) {
+      const n = this.widthInches(sku);
+      if (n == null) return null;
+      return String(sku || "")
+        .trim()
+        .toUpperCase()
+        .replace(/-(\d+)(?:(\d)\/(\d))?\s*$/, "");
+    },
+    resolveSize(sku) {
+      const n = this.widthInches(sku);
+      return n == null ? null : { value: `${n} Inch`, source: "SKU suffix (3M width)" };
     },
   },
   FLAMEMASTER: {
@@ -789,6 +878,23 @@ export function manufacturerInfo(raw) {
         .toUpperCase()
     ] || null
   );
+}
+
+/**
+ * Manufacturer config for an existing Shopify "Vendor" display value (e.g.
+ * from a baseline Matrixify row, which has no AccountMate manufacturer code
+ * of its own). Used so already-live products group/size the same way a
+ * freshly-read AccountMate row for the same manufacturer would.
+ */
+export function manufacturerInfoByVendor(vendor) {
+  const v = String(vendor || "")
+    .trim()
+    .toLowerCase();
+  if (!v) return null;
+  for (const info of Object.values(MANUFACTURERS)) {
+    if (info.vendor.toLowerCase() === v) return info;
+  }
+  return null;
 }
 
 /**

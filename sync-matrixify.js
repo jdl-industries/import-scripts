@@ -53,6 +53,8 @@ import {
   classifyCategory,
   PRODUCT_TYPE,
   manufacturerInfo,
+  manufacturerInfoByVendor,
+  typeFromAccountMateCategory,
 } from "./sync-config.js";
 
 // ===========================================================================
@@ -515,7 +517,18 @@ const SIZE_TOKENS = [
   "G-1",
 ].sort((a, b) => b.length - a.length);
 
-function skuBase(sku) {
+/**
+ * `info` is a MANUFACTURERS entry (see sync-config.js), resolved by the
+ * caller -- from AccountMate's own Manufacturer field for a fresh row, or via
+ * manufacturerInfoByVendor() for an existing baseline row that has no
+ * AccountMate data of its own. A manufacturer with its own groupKey() (e.g.
+ * 3M, where the trailing SKU token is a tape WIDTH, not a Hentzen-style pack
+ * size) is consulted first; everything else falls through to the shared
+ * SIZE_TOKENS stripping.
+ */
+function skuBase(sku, info) {
+  const custom = info?.groupKey?.(sku);
+  if (custom) return normalizeSku(custom);
   const v = normalizeSku(sku);
   for (const t of SIZE_TOKENS) if (v.endsWith(t)) return v.slice(0, -t.length).trim();
   return v;
@@ -523,12 +536,15 @@ function skuBase(sku) {
 
 /**
  * Size resolution, AccountMate first:
- *   1. an unambiguous SKU suffix (UoM is coarser -- "KIT" covers both a
+ *   1. a manufacturer-specific override (e.g. 3M's width-from-SKU)
+ *   2. an unambiguous SKU suffix (UoM is coarser -- "KIT" covers both a
  *      5-gallon and a 1.25-gallon kit)
- *   2. the Unit of Measure map
+ *   3. the Unit of Measure map
  * Unresolved is reported, never defaulted: a wrong size mislabels what ships.
  */
-function resolveSize(sku, amRow) {
+function resolveSize(sku, amRow, info) {
+  const custom = info?.resolveSize?.(sku, amRow);
+  if (custom) return custom;
   const s = normalizeSku(sku);
   for (const token of SKU_SUFFIX_OVERRIDE_ORDER) {
     if (s.endsWith(token.toUpperCase())) {
@@ -566,7 +582,7 @@ function buildHandle(amRow, sku) {
 
   if (!isHentzen) {
     const prefix = info.handlePrefix || slug(getField(amRow, "manufacturer"));
-    const mpn = info.partNumberFrom?.(getField(amRow, "shortDescription")) || skuBase(sku);
+    const mpn = info.partNumberFrom?.(getField(amRow, "shortDescription")) || skuBase(sku, info);
     return [prefix, slug(mpn)].filter(Boolean).join("-");
   }
 
@@ -701,6 +717,17 @@ function detectChanges(amRow, baseRow, baselineHasColumn) {
     if (valuesDiffer(want, baseRow[MATRIXIFY.indicatorCol], "string")) {
       changes[MATRIXIFY.indicatorCol] = want;
     }
+  }
+
+  // Backfill Type from AccountMate's own Categories code -- covers products
+  // created before that mapping existed (a generic placeholder like
+  // "Tape"/"Adhesive"/"Topcoat") as well as Hentzen's existing 3-value
+  // Primer/Topcoat/CARC scheme, which this splits into the finer one
+  // (Military Topcoat, Exterior Paint, Interior Paint, etc.) wherever
+  // AccountMate's Categories value maps to it.
+  const newType = typeFromAccountMateCategory(getField(amRow, "categories"));
+  if (newType && valuesDiffer(newType, baseRow["Type"], "string")) {
+    changes["Type"] = newType;
   }
 
   return { changes, skipped, ratcheted, undiffable, hasChanges: Object.keys(changes).length > 0 };
@@ -874,6 +901,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
   const managedColumns = [
     "Tags",
     "Tags Command",
+    // Non-Hentzen Type backfill only -- see detectChanges().
+    "Type",
     APPROVED_SPECS_COL,
     MEETS_SPECS_COL,
     MATRIXIFY.priceCol,
@@ -1025,17 +1054,19 @@ variant-metafield columns, so most fields would have nothing to diff against.
   const triage = { newProducts: 0, addedVariants: 0, noSize: 0, noColour: 0 };
   let defaultedSurcharges = 0;
 
-  // Existing products, indexed by the SKU base they represent.
+  // Existing products, indexed by the SKU base they represent. The baseline
+  // row has no AccountMate manufacturer code of its own, so its Vendor (set
+  // when the product was created) stands in for it.
   const baseToProduct = new Map();
   for (const r of baseRows) {
-    const k = skuBase(r[MATRIXIFY.skuCol]);
+    const k = skuBase(r[MATRIXIFY.skuCol], manufacturerInfoByVendor(r["Vendor"]));
     if (k && !baseToProduct.has(k)) baseToProduct.set(k, r);
   }
 
   // Group the new SKUs by product.
   const newGroups = new Map();
   for (const { sku, amRow } of newSkus) {
-    const k = skuBase(sku);
+    const k = skuBase(sku, manufacturerInfo(getField(amRow, "manufacturer")));
     if (!newGroups.has(k)) newGroups.set(k, []);
     newGroups.get(k).push({ sku, amRow });
   }
@@ -1064,7 +1095,7 @@ variant-metafield columns, so most fields would have nothing to diff against.
 
     const memberRows = [];
     for (const { sku, amRow } of members) {
-      const size = resolveSize(sku, amRow);
+      const size = resolveSize(sku, amRow, manufacturerInfo(getField(amRow, "manufacturer")));
       if (!size.value) triage.noSize++;
       else sizes.add(size.value);
 
@@ -1114,7 +1145,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
           ? mfgInfo.classify(getField(amRow, "shortDescription"))
           : classifyCategory(groupContent?.description, groupContent?.spec);
         Object.assign(row, PRODUCT_CATEGORY[kind]);
-        row["Type"] = PRODUCT_TYPE[kind];
+        row["Type"] =
+          typeFromAccountMateCategory(getField(amRow, "categories")) || PRODUCT_TYPE[kind];
 
         // Tags: "hazmat" when the product is hazardous, plus the base form of
         // each mil spec it is qualified for ("mil-prf-85285").
@@ -1357,6 +1389,7 @@ variant-metafield columns, so most fields would have nothing to diff against.
     ...idCols,
     "Tags",
     "Tags Command",
+    "Type",
     APPROVED_SPECS_COL,
     MEETS_SPECS_COL,
     // Written when a discontinued variant is retired in place (qty 0 + deny).

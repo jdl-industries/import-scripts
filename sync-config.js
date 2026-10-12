@@ -27,19 +27,13 @@ export const SURCHARGE = {
   // The indicator is a product-level metafield.
   indicatorScope: "product",
 
-  // AccountMate leaves Surcharge percent/amount at 0.00 on newly-added items --
-  // 56 of the 59 new SKUs in the 2026-08-27 export. The catalog convention is
-  // otherwise uniform: "Surcharge percent" is 8.00 on every one of the 85 rows
-  // where it is set, and Shopify carries the surcharge indicator on 168/172
-  // variants. So NEW products fall back to this rate when AccountMate has none.
-  //
-  // Verified to reproduce existing values exactly: 569.00 x 8% = 45.52,
-  // 244.36 x 8% = 19.55 -- matching the live compare-at prices.
-  //
-  // Set to null to disable the fallback and leave new products with no
-  // surcharge. Existing products are NEVER affected by this: they always use the
-  // surcharge AccountMate reports.
-  defaultPercentForNewProducts: 8.0,
+  // Disabled (2026-10-12): AccountMate's surcharge amount/percent drive price
+  // and compare-at directly, full stop -- zero means zero, for new products
+  // same as existing ones. This used to default new products with no
+  // surcharge reported to the catalog's 8% convention (see git history), but
+  // that silently added a surcharge AccountMate never asked for. Set to a
+  // number to re-enable that fallback.
+  defaultPercentForNewProducts: null,
 };
 
 // Every column matching this pattern is a product-level metafield: Shopify

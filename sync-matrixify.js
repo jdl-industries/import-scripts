@@ -55,6 +55,7 @@ import {
   manufacturerInfo,
   manufacturerInfoByVendor,
   typeFromAccountMateCategory,
+  genericSpecFrom,
 } from "./sync-config.js";
 
 // ===========================================================================
@@ -526,12 +527,40 @@ const SIZE_TOKENS = [
  * size) is consulted first; everything else falls through to the shared
  * SIZE_TOKENS stripping.
  */
+function stripKnownSizeSuffix(text) {
+  const v = normalizeSku(text);
+  for (const t of SIZE_TOKENS) if (v.endsWith(t)) return v.slice(0, -t.length).trim();
+  return v;
+}
+
 function skuBase(sku, info) {
   const custom = info?.groupKey?.(sku);
   if (custom) return normalizeSku(custom);
-  const v = normalizeSku(sku);
-  for (const t of SIZE_TOKENS) if (v.endsWith(t)) return v.slice(0, -t.length).trim();
-  return v;
+  return stripKnownSizeSuffix(sku);
+}
+
+/**
+ * MPN for a non-Hentzen manufacturer with no partNumberFrom() of its own (or
+ * as Henkel's fallback once its Description-based extraction misses).
+ *
+ * Vendor part number is NOT a reliable source on its own -- for 3M and
+ * Henkel it's an internal catalog code ("7000001265", "420504"), for
+ * Penreco it's a brand name ("RED TECH PET") unrelated to the SKU the rest
+ * of the catalog is keyed on. It only wins here when it is recognizably the
+ * SAME identifier as the SKU-derived base, just with different punctuation
+ * or a stray size word still attached (Flamemaster: SKU base
+ * "CS-3204B-1/2" vs. Vendor part number "CS 3204B-1/2 PINT") -- anything
+ * unrelated or purely numeric falls back to the SKU, same as before.
+ */
+function defaultPartNumber(sku, vendorPartNumber, info) {
+  const skuMpn = skuBase(sku, info);
+  const vpn = stripKnownSizeSuffix(vendorPartNumber);
+  const alnum = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const a = alnum(vpn);
+  const b = alnum(skuMpn);
+  const related = a.length >= 3 && b.length >= 3 && (a === b || a.includes(b) || b.includes(a));
+  const purelyNumeric = /^[0-9]+$/.test(a);
+  return related && !purelyNumeric ? vpn : skuMpn;
 }
 
 /**
@@ -582,8 +611,22 @@ function buildHandle(amRow, sku) {
 
   if (!isHentzen) {
     const prefix = info.handlePrefix || slug(getField(amRow, "manufacturer"));
-    const mpn = info.partNumberFrom?.(getField(amRow, "shortDescription")) || skuBase(sku, info);
-    return [prefix, slug(mpn)].filter(Boolean).join("-");
+    // Description, not Short description: the latter is now the terse
+    // 2-4 word descriptor (see the Catalog Content Playbook). Description is
+    // itself expected to genericize over time as Product Series Description
+    // adoption spreads, so this is a first attempt, not a guarantee -- the
+    // SKU/Vendor part number fallback below is the durable path.
+    const mpn =
+      info.partNumberFrom?.(getField(amRow, "description")) ||
+      defaultPartNumber(sku, getField(amRow, "vendorPartNumber"), info);
+    // A terse 2-4 word descriptor ("Gloss White Topcoat", "Aerospace
+    // Structural Paste") -- Short description, per the Catalog Content
+    // Playbook convention. Quality depends on AccountMate actually carrying
+    // that short phrase rather than today's verbose catalog-copy version;
+    // until it does, this segment will read long for some manufacturers.
+    const descriptor = getField(amRow, "shortDescription");
+    const spec = genericSpecFrom(getField(amRow, "qpl"), descriptor);
+    return [prefix, slug(mpn), slug(descriptor), spec ? slug(spec) : ""].filter(Boolean).join("-");
   }
 
   // Prefer the AccountMate Vendor SKU, falling back to the SKU base. Strip any

@@ -99,7 +99,8 @@ export const SKU_SUFFIX_SIZE_OVERRIDE = {
 
   // Non-Hentzen manufacturers (2026-09-28 multi-vendor catalog).
   "CAN 1-LB": "1 LB Can", // Penreco VV-P-236
-  "1PT": "Pint", // Flamemaster CS-3204/CS-3213 pint kits
+  "1PT": "Pint", // Flamemaster CS-3204/CS-3213 pint kits (SKU form)
+  " PINT": "Pint", // same, spelled out -- Vendor part number form
   "6OZ": "6oz Kit", // Flamemaster CS-3204/CS-3213 6oz kits
 };
 
@@ -559,6 +560,32 @@ export const NEW_PRODUCT_HANDLE = {
       : "";
   },
 };
+
+// Spec suffix for NON-Hentzen handles. Deliberately separate from
+// NEW_PRODUCT_HANDLE.specPattern/specFrom above, which are tuned to Hentzen's
+// Short description text and already protect 133 live handles -- left
+// untouched rather than risk a regression there.
+//
+// Adds MIL-S- and AMS-S- (common on Flamemaster/Henkel sealants and
+// adhesives, absent from Hentzen's own spec vocabulary) to the same
+// well-formed-only philosophy: loose matching produces garbage, so an
+// unmatched spec just means no spec suffix, not a guess.
+//
+// Scans QPL first, then Short description -- QPL is where a real
+// qualification claim lives for these manufacturers (see Flamemaster's
+// "AMS-S-8802, TYPE II, REV E"), Short description is the fallback.
+// Returns the match VERBATIM: this deliberately does NOT translate between
+// AMS and MIL designations for the same underlying spec family (e.g.
+// AMS-S-8802 vs. the older MIL-S-8802) -- that is a domain judgment call
+// this script has no business making on a military-spec-sensitive catalog.
+const GENERIC_SPEC_PATTERN =
+  /\b(MIL-(?:PRF|DTL|C|P|A|S)-\d{3,5}[A-Z]?|AMS-S-\d{3,5}|MMM-A-\d{2,4}|BMS\s*10-\d{2}|AMS\s*\d{4}|BAMS\s*\d{3}-\d{3}|DOD-P-\d{4,5}|DMS\s*\d{4})/i;
+
+export function genericSpecFrom(qplText, shortDescriptionText) {
+  const txt = `${qplText || ""} ${shortDescriptionText || ""}`.replace(/\\n/g, " ");
+  const m = txt.match(GENERIC_SPEC_PATTERN);
+  return m ? m[1].replace(/\s+/g, " ").trim() : "";
+}
 
 // ---------------------------------------------------------------------------
 // Product category

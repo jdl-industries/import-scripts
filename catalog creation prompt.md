@@ -66,17 +66,16 @@ Copy directly from input.
 
 ### 2. Title
 
-**Format:** `{Manufacturer} {Part Number(s)}, {Short Description}, {MIL-SPEC} {Type} {Class} {(QPL)}`
+**Format:** `{Manufacturer} {Manufacturer Part Number}, {Short Description}, {Most Important Spec}`
 
 Rules:
 
 - Title-case the manufacturer name ("HENTZEN" → "Hentzen")
-- Use Vendor SKU for part number(s); separate multiples with slash
-- Short description should be concise (under 6 words) - extract key product type
-- Include "(QPL)" only if QPL specification exists
+- Use Vendor SKU (formatted per Vendor's usage) for part number
+- Short description should be concise (2-6 words) - extract key finish/color/product type
 - Normalize MIL spec format: "MIL-PRF-23377 Type II Class N"
 
-**Example:** `Hentzen 17176KEP/16709CEH, Non-Chrome Epoxy Primer, MIL-PRF-23377 Type II Class N (QPL)`
+**Example:** `Hentzen 17176KEP, Non-Chrome Epoxy Primer, MIL-PRF-23377 Type II Class N`
 
 ### 3. Description
 

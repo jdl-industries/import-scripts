@@ -248,10 +248,13 @@ export const MATRIXIFY_FIELD_MAP = [
     companions: { "Variant Weight Unit": "lb" },
   },
   {
+    // Always directly mapped: unlike weight/dimensions, a zero cost is a real
+    // AccountMate value, not an absence of data, so it must overwrite rather
+    // than being treated as blank and skipped.
     source: { field: "cost" },
     col: "Variant Cost",
     compare: "number",
-    treatZeroAsBlank: true,
+    blankPolicy: "overwrite",
   },
   {
     source: { field: "vendorPartNumber" },
@@ -416,6 +419,121 @@ export const MATRIXIFY_FIELD_MAP = [
       String(v)
         .replace(/^"+|"+$/g, "")
         .trim(),
+  },
+
+  // -- Raw AccountMate mirrors (2026-10) --------------------------------------
+  // These exist purely to make drift detectable: several Shopify-facing fields
+  // are COMPUTED from AccountMate (Variant Price = price + surcharge) or
+  // frozen after creation (MPN, Vendor), so the live Shopify value is not a
+  // reliable record of what AccountMate currently says. Each one mirrors its
+  // source column VERBATIM, blankPolicy "overwrite", same treatment as the
+  // description/category mirrors above -- no transform beyond the type the
+  // metafield was defined with.
+  {
+    source: { field: "price" },
+    col: "Variant Metafield: custom.accountmate_price [money]",
+    compare: "number",
+    blankPolicy: "overwrite",
+    transform: (v) => {
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? `${n.toFixed(2)} USD` : "";
+    },
+  },
+  {
+    source: { field: "surchargeAmount" },
+    col: "Variant Metafield: custom.accountmate_surcharge_amount [money]",
+    compare: "number",
+    blankPolicy: "overwrite",
+    transform: (v) => {
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? `${n.toFixed(2)} USD` : "";
+    },
+  },
+  {
+    source: { field: "surchargePercent" },
+    col: "Variant Metafield: custom.accountmate_surcharge_percent [number_decimal]",
+    compare: "number",
+    blankPolicy: "overwrite",
+    transform: (v) => {
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? String(n) : "";
+    },
+  },
+  {
+    // The raw AccountMate value, kept in sync every run -- unlike
+    // mm-google-shopping.mpn above, which is newProductsOnly because the
+    // live MPN gets hand-corrected. This mirror is never hand-corrected: it
+    // exists only so a correction becomes visible as a diff.
+    source: { field: "vendorPartNumber" },
+    col: "Variant Metafield: custom.accountmate_vendor_part_number [single_line_text_field]",
+    compare: "string",
+    blankPolicy: "overwrite",
+    transform: (v) => String(v).trim().replace(/\s+/g, " "),
+  },
+  {
+    // Drives Vendor/handlePrefix at creation only (see MANUFACTURERS in this
+    // file) and is never resynced afterwards -- a re-assignment in AccountMate
+    // is otherwise invisible.
+    source: { field: "manufacturer" },
+    col: "Metafield: custom.accountmate_manufacturer [single_line_text_field]",
+    compare: "string",
+    blankPolicy: "overwrite",
+    scope: "product",
+  },
+  {
+    // Drives colour-code extraction into color-map.csv, but only the
+    // low-confidence matches land there for review. This mirrors the raw text
+    // so a change is visible even when extraction resolves to the same code.
+    source: { field: "colorSpecs" },
+    col: "Metafield: custom.accountmate_color_specs [single_line_text_field]",
+    compare: "string",
+    blankPolicy: "overwrite",
+    scope: "product",
+  },
+  {
+    // Raw qualification string. custom.approved_specifications holds the
+    // RESOLVED metaobject references derived from this text; this mirror
+    // catches a wording change or a new qualifier the parser doesn't resolve.
+    source: { field: "qpl" },
+    col: "Metafield: custom.accountmate_qpl [single_line_text_field]",
+    compare: "string",
+    blankPolicy: "overwrite",
+    scope: "product",
+  },
+  {
+    // Same, for custom.meets_specifications.
+    source: { field: "meetsSpecs" },
+    col: "Metafield: custom.accountmate_meets_specs [single_line_text_field]",
+    compare: "string",
+    blankPolicy: "overwrite",
+    scope: "product",
+  },
+  {
+    // Read today only for new-product description copy (gen-content.mjs) --
+    // never written or compared on an update, so a change is currently
+    // invisible once a product exists.
+    source: { field: "aviation" },
+    col: "Metafield: custom.accountmate_aviation [boolean]",
+    compare: "string",
+    blankPolicy: "overwrite",
+    scope: "product",
+    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+  },
+  {
+    source: { field: "marine" },
+    col: "Metafield: custom.accountmate_marine [boolean]",
+    compare: "string",
+    blankPolicy: "overwrite",
+    scope: "product",
+    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+  },
+  {
+    source: { field: "industrial" },
+    col: "Metafield: custom.accountmate_industrial [boolean]",
+    compare: "string",
+    blankPolicy: "overwrite",
+    scope: "product",
+    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
   },
 ];
 

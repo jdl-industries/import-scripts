@@ -485,6 +485,13 @@ const PRODUCT_LEVEL_CARRY = [
   "Metafield: custom.applications [list.single_line_text_field]",
   "Metafield: custom.parent_collection [collection_reference]",
   "Metafield: custom.nsn [single_line_text_field]",
+  "Metafield: custom.accountmate_manufacturer [single_line_text_field]",
+  "Metafield: custom.accountmate_color_specs [single_line_text_field]",
+  "Metafield: custom.accountmate_qpl [single_line_text_field]",
+  "Metafield: custom.accountmate_meets_specs [single_line_text_field]",
+  "Metafield: custom.accountmate_aviation [boolean]",
+  "Metafield: custom.accountmate_marine [boolean]",
+  "Metafield: custom.accountmate_industrial [boolean]",
 ];
 
 // --- grouping --------------------------------------------------------------

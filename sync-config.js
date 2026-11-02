@@ -55,6 +55,7 @@ export const UOM_TO_SIZE = {
   "GGL.80": "Gallon",
   "1-GL KIT": "1 Gallon Kit",
   GALKIT: "1 Gallon Kit",
+  "2-QT KIT": "2 Quart Kit",
   "2-GL KIT": "2 Gallon Kit",
   "4-GL KIT": "4 Gallon Kit",
   QRTKT: "Quart",
@@ -517,7 +518,8 @@ export const MATRIXIFY_FIELD_MAP = [
     compare: "string",
     blankPolicy: "overwrite",
     scope: "product",
-    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+    transform: (v) =>
+      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
   },
   {
     source: { field: "marine" },
@@ -525,7 +527,8 @@ export const MATRIXIFY_FIELD_MAP = [
     compare: "string",
     blankPolicy: "overwrite",
     scope: "product",
-    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+    transform: (v) =>
+      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
   },
   {
     source: { field: "industrial" },
@@ -533,7 +536,8 @@ export const MATRIXIFY_FIELD_MAP = [
     compare: "string",
     blankPolicy: "overwrite",
     scope: "product",
-    transform: (v) => (String(v).trim().toLowerCase() === "yes" ? "true" : "false"),
+    transform: (v) =>
+      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
   },
 ];
 
@@ -700,7 +704,10 @@ const GENERIC_SPEC_PATTERN =
   /\b(MIL-(?:PRF|DTL|C|P|A|S)-\d{3,5}[A-Z]?|AMS-S-\d{3,5}|MMM-A-\d{2,4}|BMS\s*10-\d{2}|AMS\s*\d{4}|BAMS\s*\d{3}-\d{3}|DOD-P-\d{4,5}|DMS\s*\d{4})/i;
 
 export function genericSpecFrom(qplText, shortDescriptionText) {
-  const txt = `${qplText || ""} ${shortDescriptionText || ""}`.replace(/\\n/g, " ");
+  const txt = `${qplText || ""} ${shortDescriptionText || ""}`.replace(
+    /\\n/g,
+    " ",
+  );
   const m = txt.match(GENERIC_SPEC_PATTERN);
   return m ? m[1].replace(/\s+/g, " ").trim() : "";
 }
@@ -979,7 +986,9 @@ export const MANUFACTURERS = {
     },
     resolveSize(sku) {
       const n = this.widthInches(sku);
-      return n == null ? null : { value: `${n} Inch`, source: "SKU suffix (3M width)" };
+      return n == null
+        ? null
+        : { value: `${n} Inch`, source: "SKU suffix (3M width)" };
     },
   },
   FLAMEMASTER: {

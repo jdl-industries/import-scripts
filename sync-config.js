@@ -13,27 +13,12 @@
 // resolve by NAME so a reordered export doesn't silently shift every value.
 export const ATTRIBUTE_SLOTS = 19;
 // When a surcharge amount is present, Shopify's "Variant Price" is the base
-// price PLUS the surcharge, "Variant Compare At Price" holds the surcharge
-// itself, and a metafield flags the convention. This is the ONLY place
-// Variant Price is computed.
+// price PLUS the surcharge
 export const SURCHARGE = {
   amountField: "surchargeAmount",
   percentField: "surchargePercent",
   basePriceField: "price",
   priceCol: "Variant Price",
-  compareAtCol: "Variant Compare At Price",
-  indicatorCol:
-    "Compare at indicates surcharge (product.metafields.custom.compare_at_indicates_surcharge)",
-  // The indicator is a product-level metafield.
-  indicatorScope: "product",
-
-  // Disabled (2026-10-12): AccountMate's surcharge amount/percent drive price
-  // and compare-at directly, full stop -- zero means zero, for new products
-  // same as existing ones. This used to default new products with no
-  // surcharge reported to the catalog's 8% convention (see git history), but
-  // that silently added a surcharge AccountMate never asked for. Set to a
-  // number to re-enable that fallback.
-  defaultPercentForNewProducts: null,
 };
 
 // Every column matching this pattern is a product-level metafield: Shopify
@@ -207,12 +192,9 @@ export const MATRIXIFY = {
   variantCommandCol: "Variant Command",
   command: "MERGE",
 
-  // Pricing follows the same base+surcharge convention as before.
+  // Price folds the surcharge straight in -- see SURCHARGE and computePricing()
+  // in sync-matrixify.js.
   priceCol: "Variant Price",
-  compareAtCol: "Variant Compare At Price",
-  // The surcharge indicator stays PRODUCT-level; it is a property of the
-  // pricing convention, not of an individual pack size.
-  indicatorCol: "Metafield: custom.compare_at_indicates_surcharge [boolean]",
 };
 
 /**
@@ -277,33 +259,17 @@ export const MATRIXIFY_FIELD_MAP = [
     transform: (v) => String(v).trim().replace(/\s+/g, " "),
   },
   {
+    // AccountMate is the sole source of truth for hazmat status. alwaysWrite
+    // means the baseline/Matrixify export is never consulted for this field --
+    // every run writes exactly what AccountMate says, full stop. (A baseline
+    // whose export happened to be missing this column once left it blank,
+    // which Matrixify reads as "clear the field"; alwaysWrite makes that
+    // failure mode structurally impossible for this field.)
     source: { field: "hazardous" },
-    // Renamed from custom.is_hazmat. The old field still exists and holds the
-    // live values, so it is listed in currentFrom below to keep the safety
-    // ratchet working while the two coexist. It is never written.
     col: "Variant Metafield: custom.hazardous [boolean]",
-    compare: "string",
-    // Metafield type was changed to boolean, so emit true/false, not Yes/No.
+    alwaysWrite: true,
     transform: (v) =>
       String(v).trim().toLowerCase() === "yes" ? "true" : "false",
-    ratchet: { protect: "true" },
-    // The metafield type was changed to boolean, which left the new column empty
-    // (0/172) while the old values still sit in the text metafield and the
-    // product-level boolean. Without these fallbacks the ratchet has no "true"
-    // to protect and would happily downgrade genuinely hazardous coatings.
-    // Consulted ONLY to establish current state for the ratchet -- never written.
-    currentFrom: [
-      "Variant Metafield: custom.is_hazmat [boolean]",
-      "Variant Metafield: custom.is_hazmat [single_line_text_field]",
-      "Metafield: custom.is_hazmat [boolean]",
-    ],
-    // Maps whatever those columns hold onto the ratchet's vocabulary.
-    normalizeCurrent: (v) => {
-      const t = String(v).trim().toLowerCase();
-      if (["yes", "true", "1"].includes(t)) return "true";
-      if (["no", "false", "0"].includes(t)) return "false";
-      return "";
-    },
   },
   {
     source: { field: "leadTime" },
@@ -334,26 +300,6 @@ export const MATRIXIFY_FIELD_MAP = [
     compare: "dimension",
     transform: dimension,
     treatZeroAsBlank: true,
-  },
-  {
-    // Legacy hazmat field, written IN PARALLEL with custom.hazardous until the
-    // theme is updated to read the new one. The two always carry the same value.
-    source: { field: "hazardous" },
-    col: "Variant Metafield: custom.is_hazmat [boolean]",
-    compare: "string",
-    transform: (v) =>
-      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
-    ratchet: { protect: "true" },
-    currentFrom: [
-      "Variant Metafield: custom.hazardous [boolean]",
-      "Metafield: custom.is_hazmat [boolean]",
-    ],
-    normalizeCurrent: (v) => {
-      const t = String(v).trim().toLowerCase();
-      if (["yes", "true", "1"].includes(t)) return "true";
-      if (["no", "false", "0"].includes(t)) return "false";
-      return "";
-    },
   },
   {
     source: { field: "needsDryIce" },

@@ -132,7 +132,9 @@ const normalizeSku = (s) => (s || "").trim().toUpperCase().replace(/\s+/g, " ");
 const getField = (row, field) => (AM ? AM.get(row, field) : "");
 
 const getSource = (row, source) =>
-  source.field ? getField(row, source.field) : String(row[source.col] ?? "").trim();
+  source.field
+    ? getField(row, source.field)
+    : String(row[source.col] ?? "").trim();
 
 function isBlank(v, treatZeroAsBlank) {
   if (v === "" || v == null) return true;
@@ -181,7 +183,10 @@ function valuesDiffer(a, b, compare, tolerance = 0.01) {
 
 /** Semicolon-delimited input -> JSON array, one element per value. */
 function jsonList(v) {
-  const parts = String(v || "").split(";").map((x) => x.trim()).filter(Boolean);
+  const parts = String(v || "")
+    .split(";")
+    .map((x) => x.trim())
+    .filter(Boolean);
   return parts.length ? JSON.stringify(parts) : "";
 }
 
@@ -191,67 +196,40 @@ function jsonList(v) {
  * the catalog already uses and what the storefront expects.
  */
 function jsonBlob(v) {
-  const parts = String(v || "").split(";").map((x) => x.trim()).filter(Boolean);
+  const parts = String(v || "")
+    .split(";")
+    .map((x) => x.trim())
+    .filter(Boolean);
   return parts.length ? JSON.stringify([parts.join("; ")]) : "";
 }
 
 /**
- * Shopify pricing derived from AccountMate. One place, so the update path and
- * the new-product path cannot drift.
- *
- *   neither surcharge set   price = AccountMate price
- *                           compare-at CLEARED, indicator false
- *   surcharge AMOUNT set    price = price + amount
- *                           compare-at = amount, indicator true
- *   surcharge PERCENT set   price = price + (price * percent/100)
- *                           compare-at = price * percent/100, indicator true
- *
- * Amount wins if both are present. Clearing compare-at when the surcharge drops
- * to zero matters: 57 SKUs currently carry a stale compare-at from a surcharge
- * AccountMate no longer reports, which the storefront renders as a struck-out
- * price.
+ * Shopify price derived from AccountMate: base price plus whatever surcharge
+ * AccountMate reports (amount wins over percent). One place, so the update
+ * path and the new-product path cannot drift.
  */
-function computePricing(amRow, { allowDefaultSurcharge = false } = {}) {
+function computePricing(amRow) {
   const base = parseFloat(getField(amRow, SURCHARGE.basePriceField));
   const amount = parseFloat(getField(amRow, SURCHARGE.amountField)) || 0;
   const percent = parseFloat(getField(amRow, SURCHARGE.percentField)) || 0;
 
   let surcharge = 0;
-  let source = "";
   if (amount > 0) {
     surcharge = amount;
-    source = "amount";
   } else if (percent > 0 && Number.isFinite(base)) {
     surcharge = +(base * (percent / 100)).toFixed(2);
-    source = "percent";
   }
 
-  // New products only: AccountMate leaves both fields at 0 on newly-added
-  // items, so fall back to the catalog-standard rate. Never applied to an
-  // existing product -- those always reflect what AccountMate reports.
-  let defaulted = false;
-  const fallback = SURCHARGE.defaultPercentForNewProducts;
-  if (allowDefaultSurcharge && surcharge === 0 && fallback && Number.isFinite(base) && base > 0) {
-    surcharge = +(base * (fallback / 100)).toFixed(2);
-    defaulted = surcharge > 0;
-    source = "default";
-  }
-
-  return {
-    price: Number.isFinite(base) ? (base + surcharge).toFixed(2) : "",
-    // "" means CLEAR the field -- not "leave it alone".
-    compareAt: surcharge > 0 ? surcharge.toFixed(2) : "",
-    hasSurcharge: surcharge > 0,
-    source,
-    defaulted,
-  };
+  return { price: Number.isFinite(base) ? (base + surcharge).toFixed(2) : "" };
 }
-
 
 // --- colour extraction (unchanged logic, see SYNC.md) ----------------------
 
 const decodeDescription = (d) =>
-  String(d || "").replace(/\\n/g, "\n").replace(/&amp;/g, "&").replace(/&quot;/g, '"');
+  String(d || "")
+    .replace(/\\n/g, "\n")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"');
 
 function extractColor(shortDescription) {
   const txt = decodeDescription(shortDescription);
@@ -295,7 +273,9 @@ function loadContentMap(file) {
   if (!fs.existsSync(file)) return new Map();
   const { rows } = parseCSV(fs.readFileSync(file, "utf-8"));
   const m = new Map();
-  const pickField = (r, name) => (r[`Confirmed ${name}`] || "").trim() || (r[`Drafted ${name}`] || "").trim();
+  const pickField = (r, name) =>
+    (r[`Confirmed ${name}`] || "").trim() ||
+    (r[`Drafted ${name}`] || "").trim();
   for (const r of rows) {
     const k = normalizeSku(r.SKU);
     if (!k) continue;
@@ -348,14 +328,25 @@ function loadColorMap(file) {
  */
 function hydrateBaseline(rows, headers) {
   const productCols = headers.filter(
-    (h) => /^Metafield:/.test(h) || ["Title", "Body HTML", "Vendor", "Type", "Tags", "Status", "Published"].includes(h),
+    (h) =>
+      /^Metafield:/.test(h) ||
+      [
+        "Title",
+        "Body HTML",
+        "Vendor",
+        "Type",
+        "Tags",
+        "Status",
+        "Published",
+      ].includes(h),
   );
   const carry = new Map();
   for (const r of rows) {
     const h = r["Handle"];
     if (!carry.has(h)) carry.set(h, {});
     const c = carry.get(h);
-    for (const col of productCols) if ((r[col] || "").trim() !== "") c[col] = r[col];
+    for (const col of productCols)
+      if ((r[col] || "").trim() !== "") c[col] = r[col];
   }
   return rows.map((r) => {
     const c = carry.get(r["Handle"]) || {};
@@ -380,12 +371,18 @@ let AM = null;
  */
 function productSpecs(amRow) {
   const raw = specStrings(amRow, AM.get, AM.format);
-  const clean = (list) => [...new Set(list.flatMap((x) => expandSpec(x)).filter((x) => x && x.length > 2))];
+  const clean = (list) => [
+    ...new Set(
+      list.flatMap((x) => expandSpec(x)).filter((x) => x && x.length > 2),
+    ),
+  ];
   return { approved: clean(raw.approved), meets: clean(raw.meets) };
 }
 
-const APPROVED_SPECS_COL = "Metafield: custom.approved_specifications [list.metaobject_reference]";
-const MEETS_SPECS_COL = "Metafield: custom.meets_specifications [list.metaobject_reference]";
+const APPROVED_SPECS_COL =
+  "Metafield: custom.approved_specifications [list.metaobject_reference]";
+const MEETS_SPECS_COL =
+  "Metafield: custom.meets_specifications [list.metaobject_reference]";
 
 /**
  * Base-specification tags for a product.
@@ -396,7 +393,11 @@ const MEETS_SPECS_COL = "Metafield: custom.meets_specifications [list.metaobject
  * contributes its base. Where a spec IS its own base ("MEP 10-068") the title
  * is used directly.
  */
-const tagSlug = (v) => String(v).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+const tagSlug = (v) =>
+  String(v)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 
 /**
  * Searchable tags for a product.
@@ -440,7 +441,10 @@ function specBaseTags(amRow) {
  * rewritten. Comparison is case-insensitive; existing order is preserved.
  */
 function mergeTags(existing, add) {
-  const cur = String(existing || "").split(",").map((t) => t.trim()).filter(Boolean);
+  const cur = String(existing || "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
   const seen = new Set(cur.map((t) => t.toLowerCase()));
   const out = [...cur];
   for (const t of add) {
@@ -455,12 +459,18 @@ function mergeTags(existing, add) {
 /** AccountMate spec lists -> metaobject references for the two product fields. */
 function specMetafields(amRow) {
   const { approved, meets } = productSpecs(amRow);
-  const refs = (list) => list.map((t) => `product_specification.${specHandle(t)}`).join(", ");
-  return { [APPROVED_SPECS_COL]: refs(approved), [MEETS_SPECS_COL]: refs(meets) };
+  const refs = (list) =>
+    list.map((t) => `product_specification.${specHandle(t)}`).join(", ");
+  return {
+    [APPROVED_SPECS_COL]: refs(approved),
+    [MEETS_SPECS_COL]: refs(meets),
+  };
 }
 
-const MIGRATION_COLOUR_PATTERN_COL = "Metafield: shopify.color-pattern [list.metaobject_reference]";
-const MIGRATION_SAE_COL = "Metafield: custom.sae_color [single_line_text_field]";
+const MIGRATION_COLOUR_PATTERN_COL =
+  "Metafield: shopify.color-pattern [list.metaobject_reference]";
+const MIGRATION_SAE_COL =
+  "Metafield: custom.sae_color [single_line_text_field]";
 
 const PRODUCT_LEVEL_CARRY = [
   "Title",
@@ -470,7 +480,6 @@ const PRODUCT_LEVEL_CARRY = [
   "Type",
   "Status",
   "Published",
-  "Metafield: custom.compare_at_indicates_surcharge [boolean]",
   // Colour lives in the output header for NEW products, so add-variant rows
   // must echo it back -- a blank cell would clear the colour of a live product.
   MIGRATION_COLOUR_PATTERN_COL,
@@ -536,7 +545,8 @@ const SIZE_TOKENS = [
  */
 function stripKnownSizeSuffix(text) {
   const v = normalizeSku(text);
-  for (const t of SIZE_TOKENS) if (v.endsWith(t)) return v.slice(0, -t.length).trim();
+  for (const t of SIZE_TOKENS)
+    if (v.endsWith(t)) return v.slice(0, -t.length).trim();
   return v;
 }
 
@@ -562,10 +572,16 @@ function skuBase(sku, info) {
 function defaultPartNumber(sku, vendorPartNumber, info) {
   const skuMpn = skuBase(sku, info);
   const vpn = stripKnownSizeSuffix(vendorPartNumber);
-  const alnum = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const alnum = (s) =>
+    String(s || "")
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "");
   const a = alnum(vpn);
   const b = alnum(skuMpn);
-  const related = a.length >= 3 && b.length >= 3 && (a === b || a.includes(b) || b.includes(a));
+  const related =
+    a.length >= 3 &&
+    b.length >= 3 &&
+    (a === b || a.includes(b) || b.includes(a));
   const purelyNumeric = /^[0-9]+$/.test(a);
   return related && !purelyNumeric ? vpn : skuMpn;
 }
@@ -589,7 +605,8 @@ function resolveSize(sku, amRow, info) {
   }
   if (amRow) {
     const uom = getField(amRow, "unitOfMeasure").toUpperCase();
-    if (UOM_TO_SIZE[uom]) return { value: UOM_TO_SIZE[uom], source: "AccountMate UoM" };
+    if (UOM_TO_SIZE[uom])
+      return { value: UOM_TO_SIZE[uom], source: "AccountMate UoM" };
     if (uom) return { value: "", source: "", unmappedUom: uom };
   }
   return { value: "", source: "" };
@@ -633,7 +650,9 @@ function buildHandle(amRow, sku) {
     // until it does, this segment will read long for some manufacturers.
     const descriptor = getField(amRow, "shortDescription");
     const spec = genericSpecFrom(getField(amRow, "qpl"), descriptor);
-    return [prefix, slug(mpn), slug(descriptor), spec ? slug(spec) : ""].filter(Boolean).join("-");
+    return [prefix, slug(mpn), slug(descriptor), spec ? slug(spec) : ""]
+      .filter(Boolean)
+      .join("-");
   }
 
   // Prefer the AccountMate Vendor SKU, falling back to the SKU base. Strip any
@@ -644,7 +663,9 @@ function buildHandle(amRow, sku) {
   // The SKU is the client's canonical identifier.
   let mpn = NEW_PRODUCT_HANDLE.normalizeMpn(skuBase(sku));
   const spec = NEW_PRODUCT_HANDLE.specFrom(amRow);
-  return [NEW_PRODUCT_HANDLE.prefix, slug(mpn), spec ? slug(spec) : ""].filter(Boolean).join("-");
+  return [NEW_PRODUCT_HANDLE.prefix, slug(mpn), spec ? slug(spec) : ""]
+    .filter(Boolean)
+    .join("-");
 }
 
 // ===========================================================================
@@ -654,7 +675,6 @@ function buildHandle(amRow, sku) {
 function detectChanges(amRow, baseRow, baselineHasColumn) {
   const changes = {};
   const skipped = [];
-  const ratcheted = [];
   const undiffable = [];
 
   for (const f of MATRIXIFY_FIELD_MAP) {
@@ -669,12 +689,25 @@ function detectChanges(amRow, baseRow, baselineHasColumn) {
     const overwriteBlank = f.blankPolicy === "overwrite";
     if (isBlank(raw, f.treatZeroAsBlank) && !overwriteBlank) {
       const cur = (baseRow[f.col] || "").trim();
-      if (cur) skipped.push({ col: f.col, current: cur, reason: "blank in AccountMate" });
+      if (cur)
+        skipped.push({
+          col: f.col,
+          current: cur,
+          reason: "blank in AccountMate",
+        });
       continue;
     }
 
     const value = f.transform ? f.transform(raw) : raw;
     if ((value === "" || value == null) && !overwriteBlank) continue;
+
+    // alwaysWrite fields never consult the baseline at all -- AccountMate is
+    // the only source of truth, full stop. No diffing, no undiffable report.
+    if (f.alwaysWrite) {
+      changes[f.col] = value;
+      if (f.companions) Object.assign(changes, f.companions);
+      continue;
+    }
 
     // If the baseline export lacks this column we cannot know the current
     // value. MERGE makes writing it harmless, but say so rather than pretending
@@ -687,36 +720,6 @@ function detectChanges(amRow, baseRow, baselineHasColumn) {
     }
 
     if (!valuesDiffer(value, baseRow[f.col], f.compare, f.tolerance)) continue;
-
-    if (f.ratchet) {
-      // Establish what the store currently asserts. The primary column may be
-      // empty (e.g. a metafield whose type was just changed), so every column
-      // carrying the same fact is consulted. Read-only -- never written.
-      //
-      // A safety ratchet must be conservative: if ANY source still asserts the
-      // protected value, protect. Taking the first non-empty source instead let
-      // 3 SKUs through whose variant text said "No" while the product-level
-      // boolean said "true".
-      const norm = f.normalizeCurrent || ((v) => String(v).trim());
-      const sources = [f.col, ...(f.currentFrom || [])];
-      const asserted = sources
-        .map((c) => norm(baseRow[c] || ""))
-        .filter(Boolean);
-      const protect = String(f.ratchet.protect).toLowerCase();
-      const stillAsserted = asserted.some((v) => v.toLowerCase() === protect);
-
-      if (stillAsserted && String(value).toLowerCase() !== protect) {
-        ratcheted.push({
-          col: f.col,
-          current: sources
-            .map((c) => (baseRow[c] || "").trim())
-            .filter(Boolean)
-            .join(" / "),
-          proposed: value,
-        });
-        continue;
-      }
-    }
 
     changes[f.col] = value;
     if (f.companions) Object.assign(changes, f.companions);
@@ -749,24 +752,11 @@ function detectChanges(amRow, baseRow, baselineHasColumn) {
   }
 
   const pricing = computePricing(amRow);
-  if (pricing.price && valuesDiffer(pricing.price, baseRow[MATRIXIFY.priceCol], "number")) {
+  if (
+    pricing.price &&
+    valuesDiffer(pricing.price, baseRow[MATRIXIFY.priceCol], "number")
+  ) {
     changes[MATRIXIFY.priceCol] = pricing.price;
-  }
-  // compare-at and the indicator track the surcharge in BOTH directions: when
-  // AccountMate stops reporting one, the stale values must be cleared.
-  const curCompareAt = (baseRow[MATRIXIFY.compareAtCol] || "").trim();
-  if (pricing.hasSurcharge) {
-    if (valuesDiffer(pricing.compareAt, curCompareAt, "number")) {
-      changes[MATRIXIFY.compareAtCol] = pricing.compareAt;
-    }
-  } else if (curCompareAt) {
-    changes[MATRIXIFY.compareAtCol] = "";
-  }
-  if (baselineHasColumn(MATRIXIFY.indicatorCol)) {
-    const want = pricing.hasSurcharge ? "true" : "false";
-    if (valuesDiffer(want, baseRow[MATRIXIFY.indicatorCol], "string")) {
-      changes[MATRIXIFY.indicatorCol] = want;
-    }
   }
 
   // Backfill Type from AccountMate's own Categories code -- covers products
@@ -780,7 +770,12 @@ function detectChanges(amRow, baseRow, baselineHasColumn) {
     changes["Type"] = newType;
   }
 
-  return { changes, skipped, ratcheted, undiffable, hasChanges: Object.keys(changes).length > 0 };
+  return {
+    changes,
+    skipped,
+    undiffable,
+    hasChanges: Object.keys(changes).length > 0,
+  };
 }
 
 // ===========================================================================
@@ -789,7 +784,8 @@ function detectChanges(amRow, baseRow, baselineHasColumn) {
 
 function nextVersion(outdir, date) {
   let v = 1;
-  while (fs.existsSync(path.join(outdir, `updated-products-${date}-v${v}.csv`))) v++;
+  while (fs.existsSync(path.join(outdir, `updated-products-${date}-v${v}.csv`)))
+    v++;
   return `v${v}`;
 }
 
@@ -830,26 +826,38 @@ variant-metafield columns, so most fields would have nothing to diff against.
   const now = new Date();
   const date = flag(
     "--date",
-    [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-"),
+    [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0"),
+    ].join("-"),
   );
   const positional = args.filter(
-    (a, i) => !a.startsWith("--") && !["--outdir", "--date"].includes(args[i - 1]),
+    (a, i) =>
+      !a.startsWith("--") && !["--outdir", "--date"].includes(args[i - 1]),
   );
   const [amFile, baseFile] = positional;
 
   AM = readAccountMate(amFile);
   const amRows = AM.rows;
-  const { headers: baseHeaders, rows: baseRowsRaw } = parseCSV(fs.readFileSync(baseFile, "utf-8"));
+  const { headers: baseHeaders, rows: baseRowsRaw } = parseCSV(
+    fs.readFileSync(baseFile, "utf-8"),
+  );
   const baseRows = hydrateBaseline(baseRowsRaw, baseHeaders);
   const headerSet = new Set(baseHeaders);
   const baselineHasColumn = (c) => headerSet.has(c);
 
-  console.log(`AccountMate: ${amFile}  (${amRows.length} rows, ${AM.format} format)`);
+  console.log(
+    `AccountMate: ${amFile}  (${amRows.length} rows, ${AM.format} format)`,
+  );
   console.log(`Baseline:    ${baseFile}  (${baseRows.length} rows)`);
 
   // Warn loudly if the baseline is a Shopify admin export rather than Matrixify.
-  const variantMetafieldCols = baseHeaders.filter((h) => /^Variant Metafield:/.test(h));
-  const looksMatrixify = baseHeaders.includes("Variant Command") || variantMetafieldCols.length > 0;
+  const variantMetafieldCols = baseHeaders.filter((h) =>
+    /^Variant Metafield:/.test(h),
+  );
+  const looksMatrixify =
+    baseHeaders.includes("Variant Command") || variantMetafieldCols.length > 0;
   if (!looksMatrixify) {
     console.log(
       `\n  WARNING: this baseline has no Variant Metafield columns, so it is probably` +
@@ -857,7 +865,9 @@ variant-metafield columns, so most fields would have nothing to diff against.
         `\n  will be written unconditionally every run. Export from Matrixify instead.`,
     );
   }
-  console.log(`  variant metafield columns available: ${variantMetafieldCols.length}\n`);
+  console.log(
+    `  variant metafield columns available: ${variantMetafieldCols.length}\n`,
+  );
 
   // --- index --------------------------------------------------------------
   const baseBySku = new Map();
@@ -876,12 +886,16 @@ variant-metafield columns, so most fields would have nothing to diff against.
     const sku = normalizeSku(raw);
     amBySku.set(sku, r);
     if (raw !== sku && baseBySku.has(sku)) {
-      const exact = baseRows.some((b) => (b[MATRIXIFY.skuCol] || "").trim() === raw);
+      const exact = baseRows.some(
+        (b) => (b[MATRIXIFY.skuCol] || "").trim() === raw,
+      );
       if (!exact) wsOnly.push(raw);
     }
   }
   if (wsOnly.length) {
-    console.log(`SKUs matched only after whitespace normalization (${wsOnly.length}):`);
+    console.log(
+      `SKUs matched only after whitespace normalization (${wsOnly.length}):`,
+    );
     wsOnly.forEach((s) => console.log(`  ${JSON.stringify(s)}`));
     console.log("  ^ worth fixing at the source in AccountMate\n");
   }
@@ -889,11 +903,14 @@ variant-metafield columns, so most fields would have nothing to diff against.
   const matched = [];
   const newSkus = [];
   for (const [sku, amRow] of amBySku) {
-    if (baseBySku.has(sku)) matched.push({ sku, amRow, targets: baseBySku.get(sku) });
+    if (baseBySku.has(sku))
+      matched.push({ sku, amRow, targets: baseBySku.get(sku) });
     else newSkus.push({ sku, amRow });
   }
   const deletedSkus = [...baseBySku.keys()].filter((s) => !amBySku.has(s));
-  console.log(`Matched: ${matched.length}   New: ${newSkus.length}   Deleted: ${deletedSkus.length}\n`);
+  console.log(
+    `Matched: ${matched.length}   New: ${newSkus.length}   Deleted: ${deletedSkus.length}\n`,
+  );
 
   // --- colour map ---------------------------------------------------------
   // Titles live alongside the script, not in outdir -- they are authored once
@@ -925,7 +942,9 @@ variant-metafield columns, so most fields would have nothing to diff against.
     if (colorMap.has(sku)) continue;
     // The named format has a dedicated Color specs column carrying the code;
     // the legacy one only had it buried in the description text.
-    const g = extractColor(getField(amRow, "colorSpecs") || getField(amRow, "shortDescription"));
+    const g = extractColor(
+      getField(amRow, "colorSpecs") || getField(amRow, "shortDescription"),
+    );
     colorMap.set(sku, {
       SKU: sku,
       "Confirmed Color": "",
@@ -935,14 +954,25 @@ variant-metafield columns, so most fields would have nothing to diff against.
       // The AccountMate "Color" field is unused: 13 broad names ("WHITE") that
       // cannot resolve to a colour handle. "Color specs" carries the code.
       "AccountMate Color": getField(amRow, "colorSpecs"),
-      Evidence: g ? g.snippet : getField(amRow, "colorSpecs") || getField(amRow, "shortDescription").slice(0, 120),
+      Evidence: g
+        ? g.snippet
+        : getField(amRow, "colorSpecs") ||
+          getField(amRow, "shortDescription").slice(0, 120),
     });
     added++;
   }
-  const confirmed = [...colorMap.values()].filter((r) => (r["Confirmed Color"] || "").trim()).length;
-  console.log(`Content:    ${contentMap.size} authored products (${CONTENT_MAP_FILE})`);
-  console.log(`Colour map: ${colorMap.size} entries (${seeded} seeded, ${added} newly queued)`);
-  console.log(`  confirmed: ${confirmed}   pending: ${colorMap.size - confirmed}\n`);
+  const confirmed = [...colorMap.values()].filter((r) =>
+    (r["Confirmed Color"] || "").trim(),
+  ).length;
+  console.log(
+    `Content:    ${contentMap.size} authored products (${CONTENT_MAP_FILE})`,
+  );
+  console.log(
+    `Colour map: ${colorMap.size} entries (${seeded} seeded, ${added} newly queued)`,
+  );
+  console.log(
+    `  confirmed: ${confirmed}   pending: ${colorMap.size - confirmed}\n`,
+  );
 
   // --- updated ------------------------------------------------------------
   // Every column this sync is allowed to put in an output file. Because a blank
@@ -956,8 +986,6 @@ variant-metafield columns, so most fields would have nothing to diff against.
     APPROVED_SPECS_COL,
     MEETS_SPECS_COL,
     MATRIXIFY.priceCol,
-    MATRIXIFY.compareAtCol,
-    MATRIXIFY.indicatorCol,
     // Written when a discontinued variant is retired in place.
     "Variant Inventory Policy",
     // Matrixify refuses a quantity write without a tracker: "To set inventory
@@ -982,7 +1010,6 @@ variant-metafield columns, so most fields would have nothing to diff against.
 
   const updatedRows = [];
   let retiredVariants = 0;
-  const ratchetReport = [];
   const undiffableCols = new Set();
   let unchanged = 0;
 
@@ -1005,7 +1032,10 @@ variant-metafield columns, so most fields would have nothing to diff against.
       // surviving sizes alone. Archiving the whole product would take those
       // down too. Only products with nothing left go to deleted-products.
       if (!amRow) {
-        if (!isArchived(target) && handleHasLiveVariant.has(target[MATRIXIFY.handleCol])) {
+        if (
+          !isArchived(target) &&
+          handleHasLiveVariant.has(target[MATRIXIFY.handleCol])
+        ) {
           const row = {
             [MATRIXIFY.handleCol]: target[MATRIXIFY.handleCol],
             [MATRIXIFY.commandCol]: MATRIXIFY.command,
@@ -1022,13 +1052,16 @@ variant-metafield columns, so most fields would have nothing to diff against.
           if (valuesDiffer("0", target["Variant Inventory Qty"], "integer")) {
             changes["Variant Inventory Qty"] = "0";
           }
-          if (valuesDiffer("deny", target["Variant Inventory Policy"], "string")) {
+          if (
+            valuesDiffer("deny", target["Variant Inventory Policy"], "string")
+          ) {
             changes["Variant Inventory Policy"] = "deny";
           }
           Object.assign(row, changes);
           row.__changed = Object.keys(changes).join("; ");
           if (Object.keys(changes).length) retiredVariants++;
-          if (!changedOnly || Object.keys(changes).length) updatedRows.push(row);
+          if (!changedOnly || Object.keys(changes).length)
+            updatedRows.push(row);
           continue;
         }
 
@@ -1040,21 +1073,22 @@ variant-metafield columns, so most fields would have nothing to diff against.
           [MATRIXIFY.skuCol]: target[MATRIXIFY.skuCol],
         };
         for (const col of managedColumns) {
-          if (passthrough[col] === undefined) passthrough[col] = target[col] ?? "";
+          if (passthrough[col] === undefined)
+            passthrough[col] = target[col] ?? "";
         }
         if (target["ID"]) passthrough["ID"] = target["ID"];
-        if (target["Variant ID"]) passthrough["Variant ID"] = target["Variant ID"];
+        if (target["Variant ID"])
+          passthrough["Variant ID"] = target["Variant ID"];
         passthrough.__changed = "";
         updatedRows.push(passthrough);
         continue;
       }
 
-      const { changes, ratcheted, undiffable, hasChanges } = detectChanges(
+      const { changes, undiffable, hasChanges } = detectChanges(
         amRow,
         target,
         baselineHasColumn,
       );
-      ratcheted.forEach((r) => ratchetReport.push({ sku, ...r }));
       undiffable.forEach((c) => undiffableCols.add(c));
       if (!hasChanges) {
         unchanged++;
@@ -1080,7 +1114,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
       if (target["Variant ID"]) row["Variant ID"] = target["Variant ID"];
       row.__changed = Object.keys(changes).join("; ");
       updatedRows.push(row);
-      if (verbose && hasChanges) console.log(`  UPDATE ${sku}: ${row.__changed}`);
+      if (verbose && hasChanges)
+        console.log(`  UPDATE ${sku}: ${row.__changed}`);
     }
   }
 
@@ -1102,14 +1137,16 @@ variant-metafield columns, so most fields would have nothing to diff against.
   // same new product into one product with several variants.
   const newRows = [];
   const triage = { newProducts: 0, addedVariants: 0, noSize: 0, noColour: 0 };
-  let defaultedSurcharges = 0;
 
   // Existing products, indexed by the SKU base they represent. The baseline
   // row has no AccountMate manufacturer code of its own, so its Vendor (set
   // when the product was created) stands in for it.
   const baseToProduct = new Map();
   for (const r of baseRows) {
-    const k = skuBase(r[MATRIXIFY.skuCol], manufacturerInfoByVendor(r["Vendor"]));
+    const k = skuBase(
+      r[MATRIXIFY.skuCol],
+      manufacturerInfoByVendor(r["Vendor"]),
+    );
     if (k && !baseToProduct.has(k)) baseToProduct.set(k, r);
   }
 
@@ -1141,11 +1178,17 @@ variant-metafield columns, so most fields would have nothing to diff against.
     // second size of a new product titled with its raw SKU, which -- since a
     // present-but-different value overwrites -- would have clobbered the real
     // title set by the first row.
-    const groupContent = members.map(({ sku }) => contentMap.get(sku)).find((c) => c && c.title) || null;
+    const groupContent =
+      members.map(({ sku }) => contentMap.get(sku)).find((c) => c && c.title) ||
+      null;
 
     const memberRows = [];
     for (const { sku, amRow } of members) {
-      const size = resolveSize(sku, amRow, manufacturerInfo(getField(amRow, "manufacturer")));
+      const size = resolveSize(
+        sku,
+        amRow,
+        manufacturerInfo(getField(amRow, "manufacturer")),
+      );
       if (!size.value) triage.noSize++;
       else sizes.add(size.value);
 
@@ -1162,7 +1205,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
         // product's current value, since a blank cell clears the field.
         row[MATRIXIFY.handleCol] = existing[MATRIXIFY.handleCol];
         for (const col of PRODUCT_LEVEL_CARRY) {
-          if ((row[col] ?? "") === "" && (existing[col] ?? "") !== "") row[col] = existing[col];
+          if ((row[col] ?? "") === "" && (existing[col] ?? "") !== "")
+            row[col] = existing[col];
         }
       } else {
         const colour = (colorMap.get(sku)?.["Confirmed Color"] || "").trim();
@@ -1170,15 +1214,20 @@ variant-metafield columns, so most fields would have nothing to diff against.
         // An authored handle wins: it carries the spec exactly as the confirmed
         // title does, which buildHandle can only approximate from the raw
         // description text.
-        row[MATRIXIFY.handleCol] = groupContent?.handle || buildHandle(amRow, sku);
+        row[MATRIXIFY.handleCol] =
+          groupContent?.handle || buildHandle(amRow, sku);
         // AccountMate's Name is just the SKU, so an authored title is the only
         // usable source. Falls back to the SKU and is flagged for review.
         row["Title"] = groupContent?.title || sku;
-        row["Body HTML"] = groupContent?.body || getField(amRow, "description") || "";
+        row["Body HTML"] =
+          groupContent?.body || getField(amRow, "description") || "";
         row["Status"] = NEW_PRODUCT_DEFAULTS.Status;
         row["Published"] = NEW_PRODUCT_DEFAULTS.Published;
         const mfgInfo = manufacturerInfo(getField(amRow, "manufacturer"));
-        row["Vendor"] = mfgInfo?.vendor || getField(amRow, "manufacturer") || NEW_PRODUCT_DEFAULTS.Vendor;
+        row["Vendor"] =
+          mfgInfo?.vendor ||
+          getField(amRow, "manufacturer") ||
+          NEW_PRODUCT_DEFAULTS.Vendor;
         row["Variant Taxable"] = "true";
         row["Variant Inventory Tracker"] = "shopify";
         row["Variant Inventory Policy"] = "deny";
@@ -1196,12 +1245,14 @@ variant-metafield columns, so most fields would have nothing to diff against.
           : classifyCategory(groupContent?.description, groupContent?.spec);
         Object.assign(row, PRODUCT_CATEGORY[kind]);
         row["Type"] =
-          typeFromAccountMateCategory(getField(amRow, "categories")) || PRODUCT_TYPE[kind];
+          typeFromAccountMateCategory(getField(amRow, "categories")) ||
+          PRODUCT_TYPE[kind];
 
-        // Tags: "hazmat" when the product is hazardous, plus the base form of
-        // each mil spec it is qualified for ("mil-prf-85285").
-        const isHazmat = /^yes$/i.test(getField(amRow, "hazardous"));
-        const tags = [...new Set([isHazmat ? "hazmat" : "", ...specBaseTags(amRow)].filter(Boolean))];
+        // Tags: the base form of each mil spec the product is qualified for
+        // ("mil-prf-85285"). The "hazmat" tag itself is added afterward, in
+        // the hazmat tag pass below, which looks at every variant under the
+        // handle rather than just this one.
+        const tags = specBaseTags(amRow);
         if (tags.length) {
           row["Tags"] = tags.join(", ");
           row["Tags Command"] = "REPLACE";
@@ -1211,28 +1262,50 @@ variant-metafield columns, so most fields would have nothing to diff against.
         // a blank cell would clear the field, and these columns are shared with
         // add-variant rows.
         const meta = {
-          "Metafield: custom.mil_specs [list.metaobject_reference]": (groupContent?.milSpecs || "")
-            .split(",").map((x) => x.trim()).filter(Boolean)
-            .map((h) => (h.startsWith("military_specification.") ? h : `military_specification.${h}`))
+          "Metafield: custom.mil_specs [list.metaobject_reference]": (
+            groupContent?.milSpecs || ""
+          )
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean)
+            .map((h) =>
+              h.startsWith("military_specification.")
+                ? h
+                : `military_specification.${h}`,
+            )
             .join(", "),
-          "Metafield: custom.qpl [list.metaobject_reference]": (groupContent?.qpl || "")
-            .split(",").map((x) => x.trim()).filter(Boolean)
-            .map((h) => (h.startsWith("military_specification.") ? h : `military_specification.${h}`))
+          "Metafield: custom.qpl [list.metaobject_reference]": (
+            groupContent?.qpl || ""
+          )
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean)
+            .map((h) =>
+              h.startsWith("military_specification.")
+                ? h
+                : `military_specification.${h}`,
+            )
             .join(", "),
           // list.single_line_text_field is stored as a JSON array, one element
           // per value -- NOT a semicolon-delimited blob. (The existing catalog
           // has several of these as a single element containing semicolons;
           // that is the shape being corrected here.)
-          "Metafield: custom.compliance_certifications [list.single_line_text_field]": jsonBlob(groupContent?.compliance),
-          "Metafield: custom.applications [list.single_line_text_field]": jsonList(groupContent?.applications),
-          "Metafield: custom.parent_collection [collection_reference]": groupContent?.parentCollection || "",
-          "Metafield: custom.nsn [single_line_text_field]": groupContent?.nsn || "",
+          "Metafield: custom.compliance_certifications [list.single_line_text_field]":
+            jsonBlob(groupContent?.compliance),
+          "Metafield: custom.applications [list.single_line_text_field]":
+            jsonList(groupContent?.applications),
+          "Metafield: custom.parent_collection [collection_reference]":
+            groupContent?.parentCollection || "",
+          "Metafield: custom.nsn [single_line_text_field]":
+            groupContent?.nsn || "",
         };
         for (const [k, v] of Object.entries(meta)) if (v) row[k] = v;
         // Colour is a METAFIELD now, not a variant option, so an unconfirmed
         // colour no longer blocks the import -- it just leaves the field unset.
         if (colour) {
-          row[MIGRATION_COLOUR_PATTERN_COL] = colour.startsWith("shopify--color-pattern.")
+          row[MIGRATION_COLOUR_PATTERN_COL] = colour.startsWith(
+            "shopify--color-pattern.",
+          )
             ? colour
             : `shopify--color-pattern.${colour}`;
           if (/^\d{5}$/.test(colour)) row[MIGRATION_SAE_COL] = colour;
@@ -1241,7 +1314,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
 
       for (const f of MATRIXIFY_FIELD_MAP) {
         const raw = getSource(amRow, f.source);
-        if (isBlank(raw, f.treatZeroAsBlank) && f.blankPolicy !== "overwrite") continue;
+        if (isBlank(raw, f.treatZeroAsBlank) && f.blankPolicy !== "overwrite")
+          continue;
         const value = f.transform ? f.transform(raw) : raw;
         if (value !== "" && value != null) {
           row[f.col] = value;
@@ -1249,13 +1323,8 @@ variant-metafield columns, so most fields would have nothing to diff against.
         }
       }
 
-      const pricing = computePricing(amRow, { allowDefaultSurcharge: true });
+      const pricing = computePricing(amRow);
       if (pricing.price) row[MATRIXIFY.priceCol] = pricing.price;
-      if (pricing.hasSurcharge) {
-        row[MATRIXIFY.compareAtCol] = pricing.compareAt;
-        row[MATRIXIFY.indicatorCol] = "true";
-      }
-      if (pricing.defaulted) defaultedSurcharges++;
 
       row.__action = existing ? "add-variant" : "new-product";
       row.__sizeSource = size.source;
@@ -1263,7 +1332,9 @@ variant-metafield columns, so most fields would have nothing to diff against.
         !size.value ? "size" : "",
         !existing && !groupContent?.title ? "title" : "",
         !existing && !groupContent?.body ? "description" : "",
-        !existing && !(colorMap.get(sku)?.["Confirmed Color"] || "").trim() ? "colour" : "",
+        !existing && !(colorMap.get(sku)?.["Confirmed Color"] || "").trim()
+          ? "colour"
+          : "",
         !pricing.price ? "price" : "",
         !row["Variant Weight"] ? "weight" : "",
       ]
@@ -1275,9 +1346,15 @@ variant-metafield columns, so most fields would have nothing to diff against.
     // custom.size goes on the product's FIRST row only, listing every distinct
     // size in vocabulary order. Omitted entirely if any size lacks a metaobject,
     // rather than writing a dangling reference.
-    const ordered = [...sizes].sort((x, y) => SIZE_VOCABULARY.indexOf(x) - SIZE_VOCABULARY.indexOf(y));
+    const ordered = [...sizes].sort(
+      (x, y) => SIZE_VOCABULARY.indexOf(x) - SIZE_VOCABULARY.indexOf(y),
+    );
     const handles = ordered.map((sz) => SIZE_METAOBJECT[sz]).filter(Boolean);
-    if (memberRows.length && handles.length === ordered.length && ordered.length) {
+    if (
+      memberRows.length &&
+      handles.length === ordered.length &&
+      ordered.length
+    ) {
       memberRows[0][SIZE_METAFIELD_COL] = handles.join(", ");
     }
     memberRows[0] && (memberRows[0].__sizes = ordered.join(" | "));
@@ -1294,6 +1371,50 @@ variant-metafield columns, so most fields would have nothing to diff against.
     if ((row["Variant Inventory Qty"] ?? "").toString().trim() === "") continue;
     if (!(row["Variant Inventory Tracker"] ?? "").toString().trim()) {
       row["Variant Inventory Tracker"] = "shopify";
+    }
+  }
+
+  // --- hazmat tag -----------------------------------------------------------
+  // The "hazmat" product tag mirrors AccountMate directly: present if ANY live
+  // variant under the handle is hazardous, absent otherwise. Driven off
+  // AccountMate's own "hazardous" field rather than the metafield columns
+  // already written onto these rows, so it stays correct even if a product's
+  // hazmat variant and its other variants end up on different output rows.
+  // Only handles with at least one live AccountMate SKU are touched -- a
+  // product with nothing left in AccountMate is being discontinued, not
+  // re-tagged.
+  {
+    const liveHandles = new Set([
+      ...handleHasLiveVariant,
+      ...newRows.map((r) => r[MATRIXIFY.handleCol]),
+    ]);
+    const byHandle = new Map();
+    for (const r of [...updatedRows, ...newRows]) {
+      const h = r[MATRIXIFY.handleCol];
+      if (!h || !liveHandles.has(h)) continue;
+      if (!byHandle.has(h)) byHandle.set(h, []);
+      byHandle.get(h).push(r);
+    }
+    for (const group of byHandle.values()) {
+      const isHazmat = group.some((r) => {
+        const sku = normalizeSku(r[MATRIXIFY.skuCol]);
+        const amRow = sku ? amBySku.get(sku) : null;
+        return amRow && /^yes$/i.test(getField(amRow, "hazardous"));
+      });
+      for (const r of group) {
+        const cur = String(r["Tags"] ?? "")
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean);
+        const has = cur.some((t) => t.toLowerCase() === "hazmat");
+        if (isHazmat === has) continue;
+        r["Tags"] = (
+          isHazmat
+            ? [...cur, "hazmat"]
+            : cur.filter((t) => t.toLowerCase() !== "hazmat")
+        ).join(", ");
+        r["Tags Command"] = "REPLACE";
+      }
     }
   }
 
@@ -1351,51 +1472,62 @@ variant-metafield columns, so most fields would have nothing to diff against.
 
   // --- report -------------------------------------------------------------
   console.log("--- Summary ---");
-  const retiredListed = deletedRows.filter((r) => r.Reason.startsWith("Retired in place")).length;
+  const retiredListed = deletedRows.filter((r) =>
+    r.Reason.startsWith("Retired in place"),
+  ).length;
   console.log(
     `  deleted-products : ${deletedRows.length} rows` +
-      (retiredListed ? `  (${retiredListed} retired in place, ${deletedRows.length - retiredListed} to retire)` : "") +
+      (retiredListed
+        ? `  (${retiredListed} retired in place, ${deletedRows.length - retiredListed} to retire)`
+        : "") +
       (archivedSkipped ? `  [${archivedSkipped} archived skipped]` : ""),
   );
   const changedRowCount = updatedRows.filter((r) => r.__changed).length;
   console.log(
     `  updated-products : ${updatedRows.length} rows -- ${changedRowCount} changed, ` +
       `${updatedRows.length - changedRowCount} unchanged` +
-      (changedOnly ? " [--changed-only]" : ` (mirrors the ${baseRows.length}-row baseline)`),
+      (changedOnly
+        ? " [--changed-only]"
+        : ` (mirrors the ${baseRows.length}-row baseline)`),
   );
   if (retiredVariants) {
-    console.log(`      variants retired in place: ${retiredVariants}  (qty 0 + policy deny)`);
+    console.log(
+      `      variants retired in place: ${retiredVariants}  (qty 0 + policy deny)`,
+    );
   }
   console.log(`  new-products     : ${newRows.length} rows`);
   console.log(`      new products created   : ${triage.newProducts}`);
   console.log(`      sizes added to existing: ${triage.addedVariants}`);
-  if (triage.noSize) console.log(`      UNRESOLVED size        : ${triage.noSize}  (blocks import)`);
-  if (triage.noColour) console.log(`      awaiting a colour      : ${triage.noColour}  (metafield only, does not block)`);
-  if (defaultedSurcharges) {
-    console.log(`      surcharge defaulted to ${SURCHARGE.defaultPercentForNewProducts}% : ${defaultedSurcharges}`);
-  }
+  if (triage.noSize)
+    console.log(
+      `      UNRESOLVED size        : ${triage.noSize}  (blocks import)`,
+    );
+  if (triage.noColour)
+    console.log(
+      `      awaiting a colour      : ${triage.noColour}  (metafield only, does not block)`,
+    );
 
   if (undiffableCols.size) {
-    console.log(`\n  Columns absent from the baseline (written unconditionally):`);
+    console.log(
+      `\n  Columns absent from the baseline (written unconditionally):`,
+    );
     [...undiffableCols].forEach((c) => console.log(`    ${c}`));
     console.log(`    Export from Matrixify so these can be diffed.`);
   }
 
-  if (ratchetReport.length) {
-    const skus = [...new Set(ratchetReport.map((r) => r.sku))];
-    console.log(`\n  BLOCKED by safety ratchet (hazmat TRUE -> FALSE): ${skus.length} SKU(s)`);
-    skus.forEach((s) => console.log(`    ${s}`));
-  }
-
   if (dupCombos.length) {
-    console.log(`\n  DUPLICATE SIZE within a product -- Shopify rejects these:`);
+    console.log(
+      `\n  DUPLICATE SIZE within a product -- Shopify rejects these:`,
+    );
     dupCombos.slice(0, 8).forEach(([k, v]) => {
       const [h, c] = k.split("||");
       console.log(`    ${h}`);
       console.log(`      "${c}" claimed by: ${v.join("  |  ")}`);
     });
     console.log(`    Usually AccountMate's UoM is too coarse to tell two pack`);
-    console.log(`    sizes apart. Fix UOM_TO_SIZE / SKU_SUFFIX_SIZE_OVERRIDE, or`);
+    console.log(
+      `    sizes apart. Fix UOM_TO_SIZE / SKU_SUFFIX_SIZE_OVERRIDE, or`,
+    );
     console.log(`    drop one row before importing.`);
   }
 
@@ -1405,18 +1537,28 @@ variant-metafield columns, so most fields would have nothing to diff against.
   const blockedSkus = new Map();
   for (const r of newRows) {
     if ((r["Option1 Value"] || "") === "NEEDS-SIZE") {
-      blockedSkus.set(r[MATRIXIFY.skuCol], "size could not be resolved from AccountMate");
+      blockedSkus.set(
+        r[MATRIXIFY.skuCol],
+        "size could not be resolved from AccountMate",
+      );
     }
   }
   for (const [key, skus] of dupCombos) {
     const [, size] = key.split("||");
     // Keep the first claimant, block the rest -- they collide on Size.
-    skus.filter((x) => !x.endsWith("(existing)")).slice(1).forEach((sku) =>
-      blockedSkus.set(sku, `duplicate Size "${size}" within this product`),
-    );
+    skus
+      .filter((x) => !x.endsWith("(existing)"))
+      .slice(1)
+      .forEach((sku) =>
+        blockedSkus.set(sku, `duplicate Size "${size}" within this product`),
+      );
   }
-  const importableNewRows = newRows.filter((r) => !blockedSkus.has(r[MATRIXIFY.skuCol]));
-  const blockedNewRows = newRows.filter((r) => blockedSkus.has(r[MATRIXIFY.skuCol]));
+  const importableNewRows = newRows.filter(
+    (r) => !blockedSkus.has(r[MATRIXIFY.skuCol]),
+  );
+  const blockedNewRows = newRows.filter((r) =>
+    blockedSkus.has(r[MATRIXIFY.skuCol]),
+  );
 
   if (dryRun) {
     console.log("\n[dry run] nothing written.");
@@ -1430,11 +1572,12 @@ variant-metafield columns, so most fields would have nothing to diff against.
   const idCols = ["ID", "Variant ID"];
   // Columns for updated-products. newProductsOnly fields are omitted: with
   // clear-on-blank semantics, merely including the column would wipe the value.
-  const mappedCols = MATRIXIFY_FIELD_MAP.filter((f) => !f.newProductsOnly).flatMap((f) => [
-    f.col,
-    ...Object.keys(f.companions || {}),
-  ]);
-  const newOnlyCols = MATRIXIFY_FIELD_MAP.filter((f) => f.newProductsOnly).map((f) => f.col);
+  const mappedCols = MATRIXIFY_FIELD_MAP.filter(
+    (f) => !f.newProductsOnly,
+  ).flatMap((f) => [f.col, ...Object.keys(f.companions || {})]);
+  const newOnlyCols = MATRIXIFY_FIELD_MAP.filter((f) => f.newProductsOnly).map(
+    (f) => f.col,
+  );
   const updHeaders = [
     ...idCols,
     "Tags",
@@ -1450,8 +1593,6 @@ variant-metafield columns, so most fields would have nothing to diff against.
     MATRIXIFY.variantCommandCol,
     MATRIXIFY.skuCol,
     MATRIXIFY.priceCol,
-    MATRIXIFY.compareAtCol,
-    MATRIXIFY.indicatorCol,
     ...mappedCols,
   ].filter((c, i, a) => a.indexOf(c) === i);
 
@@ -1479,8 +1620,6 @@ variant-metafield columns, so most fields would have nothing to diff against.
     MIGRATION_COLOUR_PATTERN_COL,
     MIGRATION_SAE_COL,
     MATRIXIFY.priceCol,
-    MATRIXIFY.compareAtCol,
-    MATRIXIFY.indicatorCol,
     ...mappedCols,
   ].filter((c, i, a) => a.indexOf(c) === i);
 
@@ -1493,21 +1632,48 @@ variant-metafield columns, so most fields would have nothing to diff against.
 
   writeCSV(
     path.join(outdir, `deleted-products-${date}-${version}.csv`),
-    ["Variant SKU", "Handle", "Title", "Status", "Variant Price", "Variant Inventory Qty", "Reason", "Suggested Action"],
+    [
+      "Variant SKU",
+      "Handle",
+      "Title",
+      "Status",
+      "Variant Price",
+      "Variant Inventory Qty",
+      "Reason",
+      "Suggested Action",
+    ],
     deletedRows,
   );
-  writeCSV(path.join(outdir, `updated-products-${date}-${version}.csv`), updHeaders, strip(updatedRows, updHeaders));
-  writeCSV(path.join(outdir, `new-products-${date}-${version}.csv`), newHeaders, strip(importableNewRows, newHeaders));
+  writeCSV(
+    path.join(outdir, `updated-products-${date}-${version}.csv`),
+    updHeaders,
+    strip(updatedRows, updHeaders),
+  );
+  writeCSV(
+    path.join(outdir, `new-products-${date}-${version}.csv`),
+    newHeaders,
+    strip(importableNewRows, newHeaders),
+  );
   if (blockedNewRows.length) {
     writeCSV(
       path.join(outdir, `new-products-BLOCKED-${date}-${version}.csv`),
       [...newHeaders, "__blockedBecause"],
-      blockedNewRows.map((r) => ({ ...r, __blockedBecause: blockedSkus.get(r[MATRIXIFY.skuCol]) })),
+      blockedNewRows.map((r) => ({
+        ...r,
+        __blockedBecause: blockedSkus.get(r[MATRIXIFY.skuCol]),
+      })),
     );
   }
   writeCSV(
     path.join(outdir, `sync-report-${date}-${version}.csv`),
-    ["File", "Variant SKU", "Handle", "Changed Fields", "Needs Review", "Handle Source"],
+    [
+      "File",
+      "Variant SKU",
+      "Handle",
+      "Changed Fields",
+      "Needs Review",
+      "Handle Source",
+    ],
     [
       ...updatedRows.map((r) => ({
         File: "updated",
@@ -1530,15 +1696,25 @@ variant-metafield columns, so most fields would have nothing to diff against.
   writeCSV(colorMapPath, COLOR_MAP_HEADERS, [...colorMap.values()]);
 
   console.log(`\nWrote to ${outdir}/`);
-  console.log(`  updated-products-${date}-${version}.csv  (${updatedRows.length} rows, Command: MERGE)`);
-  console.log(`  new-products-${date}-${version}.csv      (${importableNewRows.length} rows, ready to import)`);
+  console.log(
+    `  updated-products-${date}-${version}.csv  (${updatedRows.length} rows, Command: MERGE)`,
+  );
+  console.log(
+    `  new-products-${date}-${version}.csv      (${importableNewRows.length} rows, ready to import)`,
+  );
   if (blockedNewRows.length) {
-    console.log(`  new-products-BLOCKED-${date}-${version}.csv  (${blockedNewRows.length} rows held back)`);
+    console.log(
+      `  new-products-BLOCKED-${date}-${version}.csv  (${blockedNewRows.length} rows held back)`,
+    );
     blockedNewRows.forEach((r) =>
-      console.log(`      ${r[MATRIXIFY.skuCol].padEnd(24)}${blockedSkus.get(r[MATRIXIFY.skuCol])}`),
+      console.log(
+        `      ${r[MATRIXIFY.skuCol].padEnd(24)}${blockedSkus.get(r[MATRIXIFY.skuCol])}`,
+      ),
     );
   }
-  console.log(`  deleted-products-${date}-${version}.csv  (${deletedRows.length} rows)`);
+  console.log(
+    `  deleted-products-${date}-${version}.csv  (${deletedRows.length} rows)`,
+  );
   console.log(`  sync-report-${date}-${version}.csv`);
   console.log(`  ${COLOR_MAP_FILE}`);
   console.log(
@@ -1548,6 +1724,10 @@ variant-metafield columns, so most fields would have nothing to diff against.
 }
 
 const slugify = (s) =>
-  String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 100);
+  String(s)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 100);
 
 main();

@@ -23,7 +23,6 @@ import {
   MIL_SPEC_PATTERNS,
   MIL_SPEC_UNMAPPABLE,
   PARENT_COLLECTION,
-  APPLICATION_FIELDS,
   classifyCategory,
 } from "./sync-config.js";
 import { readAccountMate, specStrings } from "./accountmate.mjs";
@@ -205,13 +204,11 @@ const attr = (x, field) => (x ? AM.get(x, field) : "");
 const O = process.argv[2];
 const pick = (p) => fs.readdirSync(O).filter((x) => x.startsWith(p)).sort().pop();
 const np = P(O + "/" + pick("new-products"));
-const rep = P(O + "/" + pick("sync-report"));
 // Second positional argument, defaulting to the newest export present.
 const amFile = process.argv[3] || "AccountMate Export 2026-09-04.csv";
 const AM = readAccountMate(amFile);
 const amBy = new Map();
 AM.rows.forEach((x) => AM.get(x, "sku") && amBy.set(norm(AM.get(x, "sku")), x));
-const action = new Map(rep.filter((r) => r.File === "new").map((r) => [r["Variant SKU"] + "||" + r.Handle, r["Handle Source"]]));
 
 const SIZE = [" G", " KIT", "-LVOC KIT", "-2G", "K-1/4 GL", "2-OZ/KIT", "2-OZ/KT", "KIT-2GL", "KIT-1GL", "K-5GL", "K-2GL", "2GLKT", "4OZ/K", "6OZ/K", "GL/KT", "QT/KT", "GK-1", "GK-2", "G-1", "_2G", "_G", "GL", "G1", "G2", "G4", "Q2", "QT"].sort((a, b) => b.length - a.length);
 const base = (s) => { let v = norm(s); for (const t of SIZE) if (v.endsWith(t)) return v.slice(0, -t.length).trim(); return v; };
@@ -271,7 +268,6 @@ const seen = new Set();
 const missing = [];
 
 for (const r of np) {
-  if (action.get(r["Variant SKU"] + "||" + r.Handle) === "add-variant") continue;
   if (seen.has(r.Handle)) continue;
   seen.add(r.Handle);
 
@@ -317,7 +313,6 @@ for (const r of np) {
   const compliance = [...new Set(allSpecs.filter((x) => !/\bMIL-/i.test(x)))];
 
   const category = classifyCategory(desc, spec);
-  const applications = APPLICATION_FIELDS.filter(([f]) => /^yes$/i.test(attr(amRow, f))).map(([, label]) => label);
 
   rows.push({
     SKU: r["Variant SKU"],
@@ -333,8 +328,6 @@ for (const r of np) {
     "Drafted QPL": qplHandles.join(", "),
     "Confirmed Compliance": "",
     "Drafted Compliance": compliance.join("; "),
-    "Confirmed Applications": "",
-    "Drafted Applications": applications.join("; "),
     "Parent Collection": PARENT_COLLECTION[category],
     NSN: "",
     MPN: mpn,
@@ -369,7 +362,6 @@ const H = [
   "Confirmed Mil Specs", "Drafted Mil Specs",
   "Confirmed QPL", "Drafted QPL",
   "Confirmed Compliance", "Drafted Compliance",
-  "Confirmed Applications", "Drafted Applications",
   "Parent Collection",
   "NSN",
   "MPN", "Description", "Spec", "Family",
@@ -387,8 +379,7 @@ console.log(`\nunique opening paragraphs: ${uniqueLeads.size} of ${rows.length}`
 console.log(`avg description length: ${Math.round(rows.reduce((a, r) => a + r["Drafted Body HTML"].length, 0) / rows.length)} chars`);
 const n = (f) => rows.filter((r) => (r[f] || "").trim()).length;
 console.log(`\nfields populated: mil_specs ${n("Drafted Mil Specs")}, qpl ${n("Drafted QPL")}, ` +
-  `compliance ${n("Drafted Compliance")}, applications ${n("Drafted Applications")}, ` +
-  `parent_collection ${n("Parent Collection")}, nsn ${n("NSN")}`);
+  `compliance ${n("Drafted Compliance")}, parent_collection ${n("Parent Collection")}, nsn ${n("NSN")}`);
 if (unmappedSpecs.size) {
   console.log(`\nMIL specs found but NOT mapped to a metaobject (${unmappedSpecs.size}):`);
   for (const [spec, info] of unmappedSpecs) {

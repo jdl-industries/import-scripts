@@ -198,12 +198,37 @@ export const MATRIXIFY = {
 };
 
 /**
- * AccountMate -> Matrixify column mapping.
+ * AccountMate -> Shopify field mapping.
+ *
+ * Organised by Shopify-facing OUTPUT, not by AccountMate source column --
+ * several outputs (colour, the two specification lists) genuinely depend on
+ * more than one AccountMate field, so keying by a single source field would
+ * force an arbitrary attribution. One shape covers everything:
+ *
+ *   output             semantic name; resolved to an actual Matrixify column
+ *                      by MATRIXIFY_COLUMNS below. Entries with no `fn`
+ *                      write nothing -- they exist purely as a review
+ *                      trigger (see requireManualReview).
+ *   sources            AccountMate canonical field name(s) (AM.get() keys)
+ *                      this output is built from.
+ *   fn(amRow, AM, identityRow)
+ *                      computes the value. `identityRow` is only used by
+ *                      entries that need to echo an existing Shopify value
+ *                      rather than clear it (Tags, Type).
+ *   requireManualReview
+ *                      false: AccountMate is 100% trusted -- written every
+ *                      run, unconditionally, never diffed against anything.
+ *                      true: the derivation involves judgment (a heuristic,
+ *                      or a frozen/hand-corrected field) -- never
+ *                      auto-written. A change in `sources`' raw text between
+ *                      the previous and current AccountMate export flags the
+ *                      SKU for review-updates.csv instead.
+ *   newProductsOnly    set once at creation, excluded from ongoing sync
+ *                      (same reasoning as today: AccountMate's vendor part
+ *                      number is too unreliable to re-sync blind).
  *
  * `dimension` transforms emit Shopify's dimension metafield JSON shape,
  * {"value":9.0,"unit":"INCHES"}, which is the format already live in the store.
- * The parallel `custom.*_in [number_decimal]` metafields are unpopulated
- * (0/14 rows) and are treated as abandoned.
  */
 
 const dimension = (v) => {
@@ -213,279 +238,332 @@ const dimension = (v) => {
     : "";
 };
 
-export const MATRIXIFY_FIELD_MAP = [
+const yesNoBool = (v) =>
+  String(v).trim().toLowerCase() === "yes" ? "true" : "false";
+
+const moneyUSD = (v) => {
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? `${n.toFixed(2)} USD` : "";
+};
+
+const trimCollapse = (v) => String(v).trim().replace(/\s+/g, " ");
+
+export const SHOPIFY_FIELD_MAP = [
+  // -- Trusted: written unconditionally, every run, never diffed ----------
   {
-    source: { field: "onHand" },
-    col: "Variant Inventory Qty",
-    compare: "integer",
-    blankPolicy: "overwrite",
+    output: "inventoryQty",
+    sources: ["onHand"],
+    fn: (amRow, AM) => AM.get(amRow, "onHand"),
+    requireManualReview: false,
   },
   {
-    // Matrixify takes weight in its native unit -- no gram conversion, which
-    // also retires the fractional-gram comparison problem.
-    source: { field: "weight" },
-    col: "Variant Weight",
-    compare: "number",
-    tolerance: 0.01,
-    treatZeroAsBlank: true,
-    companions: { "Variant Weight Unit": "lb" },
+    output: "variantWeight",
+    sources: ["weight"],
+    fn: (amRow, AM) => AM.get(amRow, "weight"),
+    requireManualReview: false,
   },
   {
-    // Always directly mapped: unlike weight/dimensions, a zero cost is a real
-    // AccountMate value, not an absence of data, so it must overwrite rather
-    // than being treated as blank and skipped.
-    source: { field: "cost" },
-    col: "Variant Cost",
-    compare: "number",
-    blankPolicy: "overwrite",
+    output: "variantWeightUnit",
+    sources: ["weight"],
+    fn: () => "lb",
+    requireManualReview: false,
   },
   {
-    source: { field: "vendorPartNumber" },
-    // The Google channel's variant-level MPN metafield.
-    //
-    // NOT custom.manufacturer_part_number: that key is defined at PRODUCT scope
-    // (92/172 rows) as well as variant (74/172), and writing the variant one
-    // collided with the product-scoped definition -- the value landed on the
-    // product instead. mm-google-shopping.mpn is variant-scoped only, so there
-    // is no ambiguity. Both custom.* copies are left untouched.
-    col: "Variant Metafield: mm-google-shopping.mpn [single_line_text_field]",
-    compare: "string",
-    // Set once when the product is created, then owned by hand. AccountMate's
-    // Vendor SKU is too unreliable to sync on an ongoing basis -- it carries
-    // values like "PAINT" and "JDL-12", and lists AXTF-1-BR1 as AXTS-1-BR1.
-    // Excluded from updated-products entirely: leaving the column in that file
-    // with a blank value would CLEAR a hand-corrected MPN.
-    newProductsOnly: true,
-    transform: (v) => String(v).trim().replace(/\s+/g, " "),
+    output: "variantCost",
+    sources: ["cost"],
+    fn: (amRow, AM) => AM.get(amRow, "cost"),
+    requireManualReview: false,
   },
   {
-    // AccountMate is the sole source of truth for hazmat status. alwaysWrite
-    // means the baseline/Matrixify export is never consulted for this field --
-    // every run writes exactly what AccountMate says, full stop. (A baseline
-    // whose export happened to be missing this column once left it blank,
-    // which Matrixify reads as "clear the field"; alwaysWrite makes that
-    // failure mode structurally impossible for this field.)
-    source: { field: "hazardous" },
-    col: "Variant Metafield: custom.hazardous [boolean]",
-    alwaysWrite: true,
-    transform: (v) =>
-      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
+    output: "hazardous",
+    sources: ["hazardous"],
+    fn: (amRow, AM) => yesNoBool(AM.get(amRow, "hazardous")),
+    requireManualReview: false,
   },
   {
-    source: { field: "leadTime" },
-    col: "Variant Metafield: custom.lead_time [number_integer]",
-    compare: "integer",
-    transform: (v) => {
-      const m = String(v).match(/(\d+)/);
+    output: "leadTime",
+    sources: ["leadTime"],
+    fn: (amRow, AM) => {
+      const m = String(AM.get(amRow, "leadTime")).match(/(\d+)/);
       return m ? m[1] : "";
     },
+    requireManualReview: false,
   },
   {
-    source: { field: "length" },
-    col: "Variant Metafield: custom.length [dimension]",
-    compare: "dimension",
-    transform: dimension,
-    treatZeroAsBlank: true,
+    output: "length",
+    sources: ["length"],
+    fn: (amRow, AM) => dimension(AM.get(amRow, "length")),
+    requireManualReview: false,
   },
   {
-    source: { field: "width" },
-    col: "Variant Metafield: custom.width [dimension]",
-    compare: "dimension",
-    transform: dimension,
-    treatZeroAsBlank: true,
+    output: "width",
+    sources: ["width"],
+    fn: (amRow, AM) => dimension(AM.get(amRow, "width")),
+    requireManualReview: false,
   },
   {
-    source: { field: "height" },
-    col: "Variant Metafield: custom.height [dimension]",
-    compare: "dimension",
-    transform: dimension,
-    treatZeroAsBlank: true,
+    output: "height",
+    sources: ["height"],
+    fn: (amRow, AM) => dimension(AM.get(amRow, "height")),
+    requireManualReview: false,
   },
   {
-    source: { field: "needsDryIce" },
-    col: "Variant Metafield: custom.ships_frozen [boolean]",
-    compare: "string",
-    transform: (v) =>
-      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
+    output: "shipsFrozen",
+    sources: ["needsDryIce"],
+    fn: (amRow, AM) => yesNoBool(AM.get(amRow, "needsDryIce")),
+    requireManualReview: false,
   },
   {
-    source: { field: "needsSpecialPkg" },
-    col: "Variant Metafield: custom.special_packaging [boolean]",
-    compare: "string",
-    transform: (v) =>
-      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
+    output: "specialPackaging",
+    sources: ["needsSpecialPkg"],
+    fn: (amRow, AM) => yesNoBool(AM.get(amRow, "needsSpecialPkg")),
+    requireManualReview: false,
   },
   {
-    // AccountMate's own copy, mirrored VERBATIM -- no decoding, no reflowing.
-    // Blanks ARE written through, clearing the metafield: the field mirrors
-    // AccountMate exactly. The named format populates these on only 33 of 140
-    // rows, so most products will have them cleared.
-    source: { field: "description" },
-    col: "Variant Metafield: custom.accountmate_description [multi_line_text_field]",
-    compare: "string",
-    blankPolicy: "overwrite",
+    output: "accountmateDescription",
+    sources: ["description"],
+    fn: (amRow, AM) => AM.get(amRow, "description"),
+    requireManualReview: false,
   },
   {
-    source: { field: "shortDescription" },
-    col: "Variant Metafield: custom.accountmate_short_description [multi_line_text_field]",
-    compare: "string",
-    blankPolicy: "overwrite",
+    output: "accountmateShortDescription",
+    sources: ["shortDescription"],
+    fn: (amRow, AM) => AM.get(amRow, "shortDescription"),
+    requireManualReview: false,
   },
   {
-    // AccountMate's own category code ("PAINTS > MIL-TOPCOAT", "ADHESIVES >
-    // PASTE"), mirrored VERBATIM -- no normalising, no mapping. This is the
-    // same raw source typeFromAccountMateCategory() (below) reads to drive
-    // the Type field; this metafield is just a pass-through copy of it, same
-    // treatment as accountmate_description/accountmate_short_description.
-    source: { field: "categories" },
-    col: "Variant Metafield: custom.accountmate_category [single_line_text_field]",
-    compare: "string",
-    blankPolicy: "overwrite",
+    output: "accountmateCategory",
+    sources: ["categories"],
+    fn: (amRow, AM) => AM.get(amRow, "categories"),
+    requireManualReview: false,
   },
   {
     // Product family / series, e.g. "PG-6".
-    source: { field: "series" },
-    col: "Metafield: custom.series [single_line_text_field]",
-    compare: "string",
-    scope: "product",
+    output: "series",
+    sources: ["series"],
+    fn: (amRow, AM) => AM.get(amRow, "series"),
+    requireManualReview: false,
   },
   {
-    // Newly available in the named export format (8 of 140 rows).
-    source: { field: "nsn" },
-    col: "Metafield: custom.nsn [single_line_text_field]",
-    compare: "string",
-    scope: "product",
+    output: "nsn",
+    sources: ["nsn"],
+    fn: (amRow, AM) => AM.get(amRow, "nsn"),
+    requireManualReview: false,
   },
   {
-    // AccountMate's tiered price string, e.g. "1:93.00,13:78.00".
-    source: { field: "tierPrice" },
-    col: "Variant Metafield: custom.accountmate_tiered_prices [single_line_text_field]",
-    compare: "string",
-    // The export wraps this field in stray doubled quotes -- see accountmate.mjs.
-    transform: (v) =>
-      String(v)
+    output: "accountmateTieredPrices",
+    sources: ["tierPrice"],
+    fn: (amRow, AM) =>
+      String(AM.get(amRow, "tierPrice"))
         .replace(/^"+|"+$/g, "")
         .trim(),
-  },
-
-  // -- Raw AccountMate mirrors (2026-10) --------------------------------------
-  // These exist purely to make drift detectable: several Shopify-facing fields
-  // are COMPUTED from AccountMate (Variant Price = price + surcharge) or
-  // frozen after creation (MPN, Vendor), so the live Shopify value is not a
-  // reliable record of what AccountMate currently says. Each one mirrors its
-  // source column VERBATIM, blankPolicy "overwrite", same treatment as the
-  // description/category mirrors above -- no transform beyond the type the
-  // metafield was defined with.
-  {
-    source: { field: "price" },
-    col: "Variant Metafield: custom.accountmate_price [money]",
-    compare: "number",
-    blankPolicy: "overwrite",
-    transform: (v) => {
-      const n = parseFloat(v);
-      return Number.isFinite(n) ? `${n.toFixed(2)} USD` : "";
-    },
+    requireManualReview: false,
   },
   {
-    source: { field: "surchargeAmount" },
-    col: "Variant Metafield: custom.accountmate_surcharge_amount [money]",
-    compare: "number",
-    blankPolicy: "overwrite",
-    transform: (v) => {
-      const n = parseFloat(v);
-      return Number.isFinite(n) ? `${n.toFixed(2)} USD` : "";
-    },
+    output: "variantPrice",
+    sources: ["price", "surchargeAmount", "surchargePercent"],
+    fn: (amRow, AM, identityRow, computePricing) => computePricing(amRow).price,
+    requireManualReview: false,
   },
   {
-    source: { field: "surchargePercent" },
-    col: "Variant Metafield: custom.accountmate_surcharge_percent [number_decimal]",
-    compare: "number",
-    blankPolicy: "overwrite",
-    transform: (v) => {
-      const n = parseFloat(v);
+    output: "accountmatePrice",
+    sources: ["price"],
+    fn: (amRow, AM) => moneyUSD(AM.get(amRow, "price")),
+    requireManualReview: false,
+  },
+  {
+    output: "accountmateSurchargeAmount",
+    sources: ["surchargeAmount"],
+    fn: (amRow, AM) => moneyUSD(AM.get(amRow, "surchargeAmount")),
+    requireManualReview: false,
+  },
+  {
+    output: "accountmateSurchargePercent",
+    sources: ["surchargePercent"],
+    fn: (amRow, AM) => {
+      const n = parseFloat(AM.get(amRow, "surchargePercent"));
       return Number.isFinite(n) ? String(n) : "";
     },
+    requireManualReview: false,
   },
   {
-    // The raw AccountMate value, kept in sync every run -- unlike
-    // mm-google-shopping.mpn above, which is newProductsOnly because the
-    // live MPN gets hand-corrected. This mirror is never hand-corrected: it
-    // exists only so a correction becomes visible as a diff.
-    source: { field: "vendorPartNumber" },
-    col: "Variant Metafield: custom.accountmate_vendor_part_number [single_line_text_field]",
-    compare: "string",
-    blankPolicy: "overwrite",
-    transform: (v) => String(v).trim().replace(/\s+/g, " "),
+    // Never hand-corrected (unlike the frozen mpnMetafield below) -- exists
+    // only so a correction becomes visible.
+    output: "accountmateVendorPartNumber",
+    sources: ["vendorPartNumber"],
+    fn: (amRow, AM) => trimCollapse(AM.get(amRow, "vendorPartNumber")),
+    requireManualReview: false,
   },
   {
-    // Drives Vendor/handlePrefix at creation only (see MANUFACTURERS in this
-    // file) and is never resynced afterwards -- a re-assignment in AccountMate
-    // is otherwise invisible.
-    source: { field: "manufacturer" },
-    col: "Metafield: custom.accountmate_manufacturer [single_line_text_field]",
-    compare: "string",
-    blankPolicy: "overwrite",
-    scope: "product",
+    output: "accountmateManufacturer",
+    sources: ["manufacturer"],
+    fn: (amRow, AM) => AM.get(amRow, "manufacturer"),
+    requireManualReview: false,
   },
   {
-    // Drives colour-code extraction into color-map.csv, but only the
-    // low-confidence matches land there for review. This mirrors the raw text
-    // so a change is visible even when extraction resolves to the same code.
-    source: { field: "colorSpecs" },
-    col: "Metafield: custom.accountmate_color_specs [single_line_text_field]",
-    compare: "string",
-    blankPolicy: "overwrite",
-    scope: "product",
+    output: "accountmateColorSpecs",
+    sources: ["colorSpecs"],
+    fn: (amRow, AM) => AM.get(amRow, "colorSpecs"),
+    requireManualReview: false,
   },
   {
-    // Raw qualification string. custom.approved_specifications holds the
-    // RESOLVED metaobject references derived from this text; this mirror
-    // catches a wording change or a new qualifier the parser doesn't resolve.
-    source: { field: "qpl" },
-    col: "Metafield: custom.accountmate_qpl [single_line_text_field]",
-    compare: "string",
-    blankPolicy: "overwrite",
-    scope: "product",
+    output: "accountmateQpl",
+    sources: ["qpl"],
+    fn: (amRow, AM) => AM.get(amRow, "qpl"),
+    requireManualReview: false,
   },
   {
-    // Same, for custom.meets_specifications.
-    source: { field: "meetsSpecs" },
-    col: "Metafield: custom.accountmate_meets_specs [single_line_text_field]",
-    compare: "string",
-    blankPolicy: "overwrite",
-    scope: "product",
+    output: "accountmateMeetsSpecs",
+    sources: ["meetsSpecs"],
+    fn: (amRow, AM) => AM.get(amRow, "meetsSpecs"),
+    requireManualReview: false,
   },
   {
-    // Read today only for new-product description copy (gen-content.mjs) --
-    // never written or compared on an update, so a change is currently
-    // invisible once a product exists.
-    source: { field: "aviation" },
-    col: "Metafield: custom.accountmate_aviation [boolean]",
-    compare: "string",
-    blankPolicy: "overwrite",
-    scope: "product",
-    transform: (v) =>
-      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
+    output: "accountmateAviation",
+    sources: ["aviation"],
+    fn: (amRow, AM) => yesNoBool(AM.get(amRow, "aviation")),
+    requireManualReview: false,
   },
   {
-    source: { field: "marine" },
-    col: "Metafield: custom.accountmate_marine [boolean]",
-    compare: "string",
-    blankPolicy: "overwrite",
-    scope: "product",
-    transform: (v) =>
-      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
+    output: "accountmateMarine",
+    sources: ["marine"],
+    fn: (amRow, AM) => yesNoBool(AM.get(amRow, "marine")),
+    requireManualReview: false,
   },
   {
-    source: { field: "industrial" },
-    col: "Metafield: custom.accountmate_industrial [boolean]",
-    compare: "string",
-    blankPolicy: "overwrite",
-    scope: "product",
-    transform: (v) =>
-      String(v).trim().toLowerCase() === "yes" ? "true" : "false",
+    output: "accountmateIndustrial",
+    sources: ["industrial"],
+    fn: (amRow, AM) => yesNoBool(AM.get(amRow, "industrial")),
+    requireManualReview: false,
+  },
+  {
+    // Deterministic from AccountMate's own category code, same trust level
+    // as every other field here -- written blank, same as weight or a
+    // dimension, when AccountMate's Categories value has no mapping (rare:
+    // 6 of 274 current rows, and one of those -- "AXONPAINT" -- looks like
+    // bad AccountMate data worth fixing at the source, not masking).
+    output: "type",
+    sources: ["categories"],
+    fn: (
+      amRow,
+      AM,
+      identityRow,
+      _computePricing,
+      typeFromAccountMateCategory,
+    ) => typeFromAccountMateCategory(AM.get(amRow, "categories")) || "",
+    requireManualReview: false,
+  },
+  {
+    // The Google channel's variant-level MPN metafield. Set once at creation,
+    // then owned by hand -- AccountMate's Vendor part number is too
+    // unreliable to re-sync on an ongoing basis (it has carried values like
+    // "PAINT" and "JDL-12"). Excluded from ongoing sync entirely: a blank
+    // cell here would clear a hand-corrected MPN.
+    output: "mpnMetafield",
+    sources: ["vendorPartNumber"],
+    fn: (amRow, AM) => trimCollapse(AM.get(amRow, "vendorPartNumber")),
+    requireManualReview: false,
+    newProductsOnly: true,
+  },
+
+  // -- Judgment calls: never auto-written, flagged for review -------------
+  {
+    output: "colour",
+    sources: ["colorSpecs", "shortDescription"],
+    fn: null, // caller re-runs extractColor(); color-map.csv is the existing
+    // Drafted/Confirmed review surface for this one.
+    requireManualReview: true,
+  },
+  {
+    output: "approvedSpecifications",
+    sources: ["qpl"],
+    fn: null, // caller re-runs productSpecs(amRow).approved for the suggestion
+    requireManualReview: true,
+  },
+  {
+    output: "meetsSpecifications",
+    sources: ["meetsSpecs"],
+    fn: null, // caller re-runs productSpecs(amRow).meets for the suggestion
+    requireManualReview: true,
+  },
+  {
+    // The frozen mm-google-shopping.mpn (mpnMetafield above) may now be
+    // stale -- flag only, nothing safe to auto-suggest.
+    output: "mpnReview",
+    sources: ["vendorPartNumber"],
+    fn: null,
+    requireManualReview: true,
+  },
+  {
+    // Widest blast radius of any reviewed field: a manufacturer reassignment
+    // affects Vendor, handle prefix, category classification and
+    // part-number extraction all at once. No single safe auto-suggestion.
+    output: "vendorHandlePrefixCategory",
+    sources: ["manufacturer"],
+    fn: null,
+    requireManualReview: true,
+  },
+  {
+    // Feeds buildHandle()'s descriptor and new-product Body HTML fallback.
+    // Nothing re-derives an existing product's Title/handle today -- this is
+    // informational only, surfacing that the inputs changed.
+    output: "titleHandleInputs",
+    sources: ["description", "shortDescription"],
+    fn: null,
+    requireManualReview: true,
   },
 ];
+
+// Shopify Matrixify column header for each SHOPIFY_FIELD_MAP `output` that
+// actually writes a value (every `requireManualReview: true` entry with no
+// `fn` has no column -- it only ever appears in review-updates.csv). This is
+// the ONLY place that knows Matrixify's column-naming convention; a future
+// move to the Shopify Admin API only needs a new adapter here, not a new
+// SHOPIFY_FIELD_MAP.
+export const MATRIXIFY_COLUMNS = {
+  inventoryQty: "Variant Inventory Qty",
+  variantWeight: "Variant Weight",
+  variantWeightUnit: "Variant Weight Unit",
+  variantCost: "Variant Cost",
+  hazardous: "Variant Metafield: custom.hazardous [boolean]",
+  leadTime: "Variant Metafield: custom.lead_time [number_integer]",
+  length: "Variant Metafield: custom.length [dimension]",
+  width: "Variant Metafield: custom.width [dimension]",
+  height: "Variant Metafield: custom.height [dimension]",
+  shipsFrozen: "Variant Metafield: custom.ships_frozen [boolean]",
+  specialPackaging: "Variant Metafield: custom.special_packaging [boolean]",
+  accountmateDescription:
+    "Variant Metafield: custom.accountmate_description [multi_line_text_field]",
+  accountmateShortDescription:
+    "Variant Metafield: custom.accountmate_short_description [multi_line_text_field]",
+  accountmateCategory:
+    "Variant Metafield: custom.accountmate_category [single_line_text_field]",
+  series: "Metafield: custom.series [single_line_text_field]",
+  nsn: "Metafield: custom.nsn [single_line_text_field]",
+  accountmateTieredPrices:
+    "Variant Metafield: custom.accountmate_tiered_prices [single_line_text_field]",
+  variantPrice: "Variant Price",
+  accountmatePrice: "Variant Metafield: custom.accountmate_price [money]",
+  accountmateSurchargeAmount:
+    "Variant Metafield: custom.accountmate_surcharge_amount [money]",
+  accountmateSurchargePercent:
+    "Variant Metafield: custom.accountmate_surcharge_percent [number_decimal]",
+  accountmateVendorPartNumber:
+    "Variant Metafield: custom.accountmate_vendor_part_number [single_line_text_field]",
+  accountmateManufacturer:
+    "Metafield: custom.accountmate_manufacturer [single_line_text_field]",
+  accountmateColorSpecs:
+    "Metafield: custom.accountmate_color_specs [single_line_text_field]",
+  accountmateQpl: "Metafield: custom.accountmate_qpl [single_line_text_field]",
+  accountmateMeetsSpecs:
+    "Metafield: custom.accountmate_meets_specs [single_line_text_field]",
+  accountmateAviation: "Metafield: custom.accountmate_aviation [boolean]",
+  accountmateMarine: "Metafield: custom.accountmate_marine [boolean]",
+  accountmateIndustrial: "Metafield: custom.accountmate_industrial [boolean]",
+  type: "Type",
+  mpnMetafield:
+    "Variant Metafield: mm-google-shopping.mpn [single_line_text_field]",
+};
 
 // Extra columns needed when CREATING a variant or product (not for updates).
 export const MATRIXIFY_NEW_COLUMNS = [
@@ -814,12 +892,6 @@ export const PARENT_COLLECTION = {
   carc: "chemical-agent-resistive-coatings-carc",
 };
 
-export const APPLICATION_FIELDS = [
-  ["aviation", "Aviation"],
-  ["marine", "Marine"],
-  ["industrial", "Industrial"],
-];
-
 // Shopify "Type", per category. Title-case, matching the 3 values in use.
 export const PRODUCT_TYPE = {
   primer: "Primer",
@@ -866,7 +938,7 @@ const ACCOUNTMATE_CATEGORY_TO_TYPE = {
   "PAINTS > REFLECTIVE": "Reflective Paint",
   "PAINTS > THINNER": "Thinner",
   "PAINTS > MIL-CARC": "CARC",
-  "PAINTS > MIL-PRIMERS": "Military Primer", // "Miliary" in the source spec -- treated as a typo
+  "PAINTS > MIL-PRIMERS": "Military Primer",
   "PAINTS > MIL-TOPCOAT": "Military Topcoat",
 };
 

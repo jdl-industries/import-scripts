@@ -1012,6 +1012,7 @@ export the old two-argument version needed.
         "Body HTML": groupContent?.body || getField(amRow, "description") || "",
         Status: NEW_PRODUCT_DEFAULTS.Status,
         Published: NEW_PRODUCT_DEFAULTS.Published,
+        "Variant Image": NEW_PRODUCT_DEFAULTS["Variant Image"],
         Vendor:
           info?.vendor ||
           getField(amRow, "manufacturer") ||
@@ -1298,6 +1299,7 @@ export the old two-argument version needed.
     "Type",
     "Status",
     "Published",
+    "Variant Image",
     "Variant Taxable",
     "Variant Inventory Tracker",
     "Variant Inventory Policy",

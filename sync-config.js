@@ -174,6 +174,8 @@ export const NEW_PRODUCT_DEFAULTS = {
   "Variant Weight Unit": "lb",
   "Gift Card": "false",
   Vendor: "Hentzen",
+  "Variant Image":
+    "https://cdn.shopify.com/s/files/1/0750/8767/5550/files/hentzen-mil-gallon-1024.jpg?v=1771607608",
 };
 
 // ===========================================================================

@@ -1,22 +1,17 @@
 {
-  "name": "jdl-shopify-import",
-  "version": "1.0.0",
-  "description": "Shopify product catalog import tool for JDL Industries",
-  "type": "module",
-  "scripts": {
-    "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
-  },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.97.1",
-    "@shopify/shopify-api": "^11.0.0",
-    "csv-parse": "^5.5.0",
-    "dotenv": "^16.4.0"
+    "csv-parse": "^7.0.3",
+    "csv-stringify": "^6.9.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "tsx": "^4.7.0",
-    "typescript": "^5.3.0"
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "scripts": {
+    "ingest:am": "tsx scripts/ingest.ts -t am -f",
+    "ingest:shopify": "tsx scripts/ingest.ts -t shopify -f",
+    "sync": "tsx scripts/runSync.ts",
+    "sync:date": "tsx scripts/runSync.ts --date"
   }
 }

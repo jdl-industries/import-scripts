@@ -1,8 +1,0 @@
-query {
-  metaobjects(type: "color", first: 250) {
-    nodes {
-      id
-      handle
-    }
-  }
-}

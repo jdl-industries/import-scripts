@@ -1,196 +1,142 @@
-# JDL Shopify Import Tool
+# AccountMate-to-Shopify Catalog Sync
 
-Import transformed product data into Shopify for JDL Industries aerospace/industrial coatings catalog.
+CLI sync pipeline that compares daily AccountMate ERP CSV exports against current Shopify/Matrixify catalog state to produce segmented, Matrixify-ready import files and audit reports.
 
-## Overview
+# Architecture Overview
 
-This tool is part of a two-step workflow for migrating products from WooCommerce to Shopify:
+```
+                      ┌────────────────────────┐
+                      │  previousAccountMate   │ (optional diff baseline)
+                      └───────────┬────────────┘
+                                  │
+┌────────────────────────┐        │
+│    latestAccountMate   ├────────┼────────┐
+└────────────────────────┬────────┘        │
+                         ▼                 ▼
+             ┌─────────────────────────────────────────┐
+             │               syncEngine                │ ◄─── FIELD_MAPPINGS
+             │    (3-way diff, trust classification,   │      (declarative rules)
+             │     SKU normalization & resolution)     │
+             └───────────────────▲─────────────────────┘
+                                 │
+┌────────────────────────┐       │
+│     currentShopify     ├───────┘
+│   (Matrixify export)   │
+└────────────────────────┘
+                                 │
+                                 ▼
+                     ┌───────────────────────┐
+                     │      SyncResults      │
+                     └───────────┬───────────┘
+                                 │
+         ┌───────────────────────┼───────────────────────┬───────────────────────┐
+         ▼                       ▼                       ▼                       ▼
+  1_deprecations.csv      2_trusted_sync.csv      3_review_drift.csv      4_staging_new_products.csv
+  (zero qty + unpublish)  (blind updates + new    (audit: ERP modified    (draft products for
+                          variants on existing)   Shopify-owned copy)     manual review/staging)
+```
 
-1. **Transform** (Manual with LLM): Use the prompt in `catalog creation prompt.md` with any LLM (ChatGPT, Claude, etc.) to transform WooCommerce export data into a Shopify-compatible CSV.
+# Core Design Rules
 
-2. **Import** (This Tool): Use this CLI tool to import the transformed CSV into Shopify via the Admin API.
+- _3-Way Diff:_ Diffs `latestAm` against `previousAm` to isolate ERP change events, then reconciles against `currentShopify` to resolve target handles and variant IDs.
+- _Separation of Concerns:_ Parser logic, field transformation rules, diff evaluation, and output generation live in dedicated, decoupled modules.
+- _Transport Agnostic:_ The engine outputs an internal `SyncResults` domain object. Output currently targets Matrixify CSVs, but can plug into Shopify Admin GraphQL mutations (`productVariantsBulkUpdate`, `inventorySetQuantities`, `productCreate`) without altering engine logic.
+- _Exact Accounting:_ Every incoming SKU must land in exactly one bucket: `trustedUpdates`, `unchanged`, or `newProductDrafts`.
+
+# File Structure
+
+```
+├──/data
+│  ├──/accountmate             # Permanent, immutable ERP snapshots
+│  │  ├── 2026-11-04.csv
+│  │  ├── 2026-11-05.csv
+│  │  └── 2026-11-06.csv
+│  ├──/shopify                 # Permanent, immutable Shopify baseline snapshots
+│  │  ├── 2026-11-05.csv
+│  │  └── 2026-11-06.csv
+│  └──/runs                    # Output artifacts per execution
+│     ├──/2026-11-06_run-01
+│     │  ├── 1_deprecations.csv
+│     │  ├── 2_trusted_sync.csv
+│     │  ├── 3_review_drift.csv
+│     │  └── 4_staging_new_products.csv
+│     └──/2026-11-06_run-01
+├──/src
+│  ├── accountMatetypes.ts     # AccountMate raw CSV schema & normalized domain models
+│  ├── shopifyTypes.ts         # Matrixify export row schema & hierarchical catalog state
+│  ├── fieldDefinitions.ts     # Declarative FIELD_MAPPINGS array (transforms + trust levels)
+│  ├── parseAccountMate.ts     # Windows-1252/Latin1 parser, type-casting, SKU dictionary builder
+│  ├── parseShopify.ts         # Groups flat rows into products, indexes activeVariantsBySku
+│  ├── productResolver.ts      # Top-down hooks: getShopifyProduct() & resolveVariantOptions()
+│  ├── syncEngine.ts           # 3-way diff planner returning SyncResults
+│  ├── writeMatrixifyFiles.ts  # RFC 4180 CSV serializer generating segmented import files
+│  └── cli.ts                  # CLI argument parser (util.parseArgs) and execution orchestrator
+├──/scripts
+│  ├── ingest.ts               # copy and name source Shopify/accountmate files
+│  └── runSync.ts              # run the sync
+├── package.json
+└── tsconfig.json
+```
+
+# Output Workstreams
+
+1. `deprecations.csv`
+   - Trigger: SKU in `previousAm` (or active in Shopify) but absent from `latestAm`.
+   - Action: Sets `Variant Inventory Qty: 0`, `Variant Inventory Policy: deny`. If all sibling variants on the product are also absent, sets parent `Status: Archived`
+2. `trusted_sync.csv`
+   - Trigger: Existing active variant with ERP pricing/inventory changes, OR new SKU belonging to an existing Shopify parent product.
+   - Action: Blind Matrixify import containing `Handle`, `Variant ID` (if existing), `Variant SKU`, and transformed trusted fields.
+3. `review_drift.csv`
+   - Trigger: SKU where AccountMate source copy (eg `Short description`, `Description`, etc) changed between ERP exports, but Shopify is the system of record.
+   - Action: Audit-only CSV (`SKU`, `Shopify Handle`, `Field,` `Old ERP Value`, `New ERP Value`
+4. `staging_new_products.csv`
+   - Trigger: SKU in `latestAm` with no active product match in Shopify.
+   - Action: Matrixify-ready draft staging (`Status: Draft`) with best-guess title, handle, tags, and operational defaults for manual review before activation.
+
+# CLI Usage
 
 ## Prerequisites
 
-- Node.js 18+
-- npm
-- Shopify store with Admin API access
+- Node.js >= 18.x
+- TypeScript / tsx runtime
 
-## Installation
+## Typical Iteration Flow
 
-```bash
-npm install
-```
-
-## Configuration
-
-Copy the example environment file and add your Shopify credentials:
-
-```bash
-cp .env.example .env
-```
-
-Required environment variables:
-
-| Variable | Description |
-|----------|-------------|
-| `SHOPIFY_STORE_DOMAIN` | Your Shopify store domain (e.g., `store.myshopify.com`) |
-| `SHOPIFY_ACCESS_TOKEN` | Admin API access token |
-
-### Getting a Shopify Access Token
-
-1. Go to Shopify Admin → Settings → Apps and sales channels
-2. Click "Develop apps" → "Create an app"
-3. Configure Admin API scopes:
-   - `read_products`
-   - `write_products`
-4. Install the app and copy the Admin API access token
-
-## Usage
-
-### Step 1: Transform Products with LLM
-
-1. Export products from WooCommerce as CSV
-2. Open your preferred LLM (ChatGPT, Claude, etc.)
-3. Paste the contents of `catalog creation prompt.md`
-4. Attach or paste the WooCommerce CSV data
-5. Ask the LLM to transform the products
-6. Save the output as `products.csv`
-
-**Tips for large catalogs:**
-- Process in batches of 10-20 products at a time
-- Use a model with large context window (Claude, GPT-4)
-- Verify the first batch output before continuing
-
-### Step 2: Import to Shopify
-
-```bash
-# Validate CSV format (no import)
-npm run dev -- --validate products.csv
-
-# Preview products without importing
-npm run dev -- --dry-run products.csv
-
-# Import products to Shopify
-npm run dev -- products.csv
-```
-
-### Command Line Options
+1. Ingest once:
 
 ```
-Usage:
-  npm run dev -- <products.csv>
-  npm run dev -- --validate <products.csv>
-  npm run dev -- --dry-run <products.csv>
-
-Options:
-  --validate   Only validate CSV format, don't import
-  --dry-run    Parse and display products without importing
-  --help       Show help message
+npm run ingest:am -- ~/Downloads/webfile.csv
+npm run ingest:shopify -- ~/Downloads/Products.csv
 ```
 
-## CSV Format
-
-The input CSV must have exactly these 23 columns (see `catalog creation prompt.md` for details):
-
-| Column | Description |
-|--------|-------------|
-| SKU | Product SKU |
-| Title | Product title |
-| Description | Product description (HTML allowed) |
-| Regular Price | Price as number |
-| Weight | Weight in lbs |
-| Length | Length in inches |
-| Width | Width in inches |
-| Height | Height in inches |
-| Aviation | "Yes" or "No" |
-| Marine | "Yes" or "No" |
-| Industrial | "Yes" or "No" |
-| Special Packaging | "Yes" or "No" |
-| Category | Product category |
-| Is Hazmat | "true" or "false" |
-| Manufacturer Part Number | Vendor part number |
-| QPL | QPL specification |
-| NSN | National Stock Number |
-| Military Specification | MIL spec |
-| Compliance and Certifications | Other certifications |
-| Lead Time | Days as integer |
-| Page Title | SEO title (max 70 chars) |
-| Meta Description | SEO description (max 160 chars) |
-| URL Handle | URL slug |
-
-## Development
-
-### Project Structure
+2. Execute sync:
 
 ```
-src/
-├── index.ts    # CLI entry point
-├── parser.ts   # CSV parsing and validation
-├── shopify.ts  # Shopify Admin API client
-└── types.ts    # TypeScript type definitions
+npm run sync
 ```
 
-### Scripts
+_(Outputs to data/runs/2026-11-06_run-01/)_
 
-```bash
-npm run dev      # Run with tsx (development)
-npm run build    # Compile TypeScript
-npm start        # Run compiled JavaScript
+3. Tweak your mapping logic in `fieldDefinitions.ts` or `syncEngine.ts`.
+
+4. Rerun immediately:
+
+```
+npm run sync
 ```
 
-### How Import Works
+_(Outputs to data/runs/2026-11-06_run-02/, keeping inputs untouched and previous run outputs available for comparison)._
 
-1. **Validation**: CSV is checked for required columns
-2. **Parsing**: Products are extracted from CSV rows
-3. **Upsert**: For each product:
-   - Search Shopify for existing product by SKU
-   - If found, update the product
-   - If not found, create new product
-4. **Rate Limiting**: 250ms delay between API calls
+## CLI Options
 
-### Shopify Product Mapping
+- -l, --latestAm <path>: (Required) Latest AccountMate CSV export.
+- -s, --shopify <path>: (Required) Current Matrixify Products.csv export.
+- -p, --previousAm <path>: (Optional) Previous AccountMate CSV export for diffing.
+- -o, --outDir <path>: Output directory (defaults to ./dist-sync).
+  -h, --help: Output command flags.
 
-Products are created with:
-- **Title, Description, Handle**: From CSV
-- **Vendor**: Extracted from title (first word)
-- **Product Type**: From Category column
-- **Tags**: Aviation, Marine, Industrial, Hazmat flags
-- **SEO**: Page title and meta description
-- **Variant**: SKU, price, weight
-- **Metafields**:
-  - `custom.manufacturer_part_number`
-  - `custom.qpl`
-  - `custom.nsn`
-  - `custom.military_specification`
-  - `custom.compliance_certifications`
-  - `custom.lead_time_days`
-  - `custom.is_hazmat`
+## Gotchas & Edge Cases
 
-## Troubleshooting
-
-### "Missing required columns"
-
-Your CSV is missing expected columns. Check the column headers match exactly (case-sensitive). See the CSV Format section above.
-
-### "SHOPIFY_STORE_DOMAIN and SHOPIFY_ACCESS_TOKEN are required"
-
-Create a `.env` file with your Shopify credentials. See Configuration section.
-
-### Shopify API errors
-
-Common issues:
-- **Invalid handle**: URL handles must be unique, lowercase, with only letters, numbers, and dashes
-- **Rate limiting**: The tool includes delays, but if you hit limits, wait and retry
-- **Missing scopes**: Ensure your app has `read_products` and `write_products` scopes
-
-### Large imports
-
-For catalogs with many products:
-1. Transform in batches with the LLM
-2. Combine batches into one CSV (keep only one header row)
-3. Run the import tool
-
-## License
-
-Private - JDL Industries
+- Encoding: AccountMate exports use Windows-1252 / latin1 (contains unescaped trademark symbols ™, smart quotes). Reading with UTF-8 will throw decode faults.
+- Duplicate SKUs in Shopify: Old/superseded product representations exist in archived states. Only index variants where Status === 'Active' into activeVariantsBySku ($1:1$). Retain archived records in a separate fallback map (archivedVariantsBySku) for reactivation logic.
+- Field Typo in AccountMate: The raw column for special packaging surcharge is spelled Spedial pkg price in the export header.
